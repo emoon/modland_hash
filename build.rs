@@ -8,9 +8,7 @@ fn get_files(path: &str) -> Vec<String> {
             let metadata = file.metadata().unwrap();
 
             if let Some(filename) = file.path().to_str() {
-                if metadata.is_file()
-                    && !filename.ends_with(".h")
-                {
+                if metadata.is_file() && !filename.ends_with(".h") {
                     return Some(file);
                 }
             }
@@ -30,6 +28,8 @@ fn add_files(build: &mut cc::Build, path: &str) {
 fn main() {
     let mut build = cc::Build::new();
     let env = std::env::var("TARGET").unwrap();
+
+    println!("cargo:rerun-if-changed=external/libopenmpt");
 
     build.include("external/libopenmpt");
     build.include("external/libopenmpt/common");
@@ -66,35 +66,3 @@ fn main() {
         println!("cargo:rustc-link-lib=stdc++");
     }
 }
-
-/*
-    Env = {
-       CXXOPTS = {
-			{ "-std=c++17"; Config = "linux-*-*" },
-			{ "-std=c++17"; Config = "mac*-*-*" },
-			{ "/std:c++latest"; Config = "win64-*-*" },
-		},
-    },
-
-	Includes = {
-	    "src/plugin_api",
-		"src/plugins/playback/openmpt/libopenmpt",
-		"src/plugins/playback/openmpt/libopenmpt/common"
-	},
-
-	Sources = {
-		get_c_cpp_src("src/plugins/playback/openmpt/libopenmpt/soundlib"),
-		get_c_cpp_src("src/plugins/playback/openmpt/libopenmpt/common"),
-		get_c_cpp_src("src/plugins/playback/openmpt/libopenmpt/sounddsp"),
-		"src/plugins/playback/openmpt/libopenmpt/libopenmpt/libopenmpt_c.cpp",
-		"src/plugins/playback/openmpt/libopenmpt/libopenmpt/libopenmpt_cxx.cpp",
-		"src/plugins/playback/openmpt/libopenmpt/libopenmpt/libopenmpt_impl.cpp",
-		"src/plugins/playback/openmpt/libopenmpt/libopenmpt/libopenmpt_ext_impl.cpp",
-		"src/plugins/playback/openmpt/openmpt_plugin.cpp",
-	},
-
-	Libs = {
-		{ "stdc++"; Config = "macosx-*-*" },
-		{ "Rpcrt4.lib"; Config = "win64-*-*" },
-	},
-*/
