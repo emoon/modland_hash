@@ -226,13 +226,22 @@ fn get_files_from_pattern_hash(info: &TrackInfo, stmt: &mut Statement) -> Vec<St
     names
 }
 
-fn filter_names(names: &[String], dir_filters: &str) -> Vec<String> {
-    let filter_paths = dir_filters.split(',');
+fn filter_names<'a>(names: &[String], dir_filters: &str) -> Vec<String> {
     let mut output = Vec::new();
+
+    if dir_filters.is_empty() {
+        for f in names {
+            output.push(f.to_owned());
+        }
+
+        return output;
+    }
+
+    let filter_paths = dir_filters.split(',');
 
     for t in filter_paths {
         for filename in names {
-            if !filename.starts_with(t) || t.is_empty() {
+            if !filename.starts_with(t) {
                 output.push(filename.to_owned());
                 break;
             }
