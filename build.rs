@@ -37,7 +37,7 @@ fn main() {
     if env.contains("windows") {
         //
     } else if env.contains("darwin") {
-        build.flag("-std=c++");
+        build.flag("-std=c++17"); 
         //
     } else {
         build.flag("-std=c++17");
@@ -62,8 +62,7 @@ fn main() {
     if env.contains("windows") {
         // todo fixme
     } else if env.contains("darwin") {
-        build.flag("-std=c++");
-        //
+        println!("cargo:rustc-link-lib=c++");
     } else {
         println!("cargo:rustc-link-lib=stdc++");
     }

@@ -13,12 +13,6 @@
 #include <vector>
 #include <cstdint>
 #include <cstring>
-
-#ifndef _WIN32
-#include <sys/prctl.h>
-#include <linux/seccomp.h>
-#endif
-
 #include <libopenmpt/libopenmpt.hpp>
 
 static uint64_t hash_patterns(openmpt::module &mod)
