@@ -6,7 +6,12 @@ use rayon::prelude::*;
 //use regex::Regex;
 use rusqlite::{Connection, Statement};
 use sha2::Digest;
-use std::{collections::HashMap, io::Read, os::raw::c_char, sync::Mutex};
+use std::{
+    cmp::min, collections::HashMap, fs::File, io::Read, io::Write, os::raw::c_char, sync::Mutex,
+};
+
+use futures_util::{StreamExt, TryFutureExt};
+use reqwest::Client;
 use walkdir::WalkDir;
 
 fn get_files(path: &str) -> Vec<String> {
@@ -78,6 +83,10 @@ struct Args {
     #[clap(short, long)]
     build_database: Option<String>,
 
+    /// Download the remote database (done automaticlly if it doesn't exist)
+    #[clap(short, long)]
+    download_database: bool,
+
     /// Directory to match against the database. If not specificed the current directory will be used
     #[clap(short, long)]
     match_dir: Option<String>,
@@ -93,7 +102,7 @@ fn get_track_info(filename: &str) -> TrackInfo {
     let song_data = unsafe { hash_file(c_filename.as_ptr()) };
 
     // Calculate sha256 of the file
-    let mut file = std::fs::File::open(&filename).unwrap();
+    let mut file = File::open(&filename).unwrap();
     let mut file_data = Vec::new();
     file.read_to_end(&mut file_data).unwrap();
     let hash = sha2::Sha256::digest(&file_data);
@@ -180,6 +189,49 @@ fn update_database(filepath: &str, conn: &Connection) {
 
     conn.execute("COMMIT", []).unwrap();
 }
+
+async fn download(client: &Client, url: &str, path: &str) {
+    let foo = download_file(client, url, path).await.unwrap();
+}
+
+pub async fn download_file(client: &Client, url: &str, path: &str) -> Result<(), String> {
+    // Reqwest setup
+    let res = client
+        .get(url)
+        .send()
+        .await
+        .or(Err(format!("Failed to GET from '{}'", &url)))?;
+    let total_size = res
+        .content_length()
+        .ok_or(format!("Failed to get content length from '{}'", &url))?;
+
+    // Indicatif setup
+    let pb = ProgressBar::new(total_size);
+    pb.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+        .unwrap()
+        .with_key("eta", |state| format!("{:.1}s", state.eta().as_secs_f64()))
+        .progress_chars("#>-"));
+
+    pb.set_message(format!("Downloading {}", url));
+
+    // download chunks
+    let mut file = File::create(path).or(Err(format!("Failed to create file '{}'", path)))?;
+    let mut downloaded: u64 = 0;
+    let mut stream = res.bytes_stream();
+
+    while let Some(item) = stream.next().await {
+        let chunk = item.or(Err(format!("Error while downloading file")))?;
+        file.write_all(&chunk)
+            .or(Err(format!("Error while writing to file")))?;
+        let new = min(downloaded + (chunk.len() as u64), total_size);
+        downloaded = new;
+        pb.set_position(new);
+    }
+
+    pb.finish_with_message(format!("Downloaded {} to {}", url, path));
+    Ok(())
+}
+
 // tetsehou{
 /*
     let re = Regex::new(search_string).unwrap();
@@ -306,9 +358,21 @@ fn match_dir_against_db(dir: &str, dir_filters: &str, db: &Connection) {
     }
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let args = Args::parse();
     let conn;
+
+    if args.download_database {
+        let client = reqwest::Client::new();
+        let t = download(
+            &client,
+            "https://www.dropbox.com/s/mpi7212hplodyav/modland_hash.zip?dl=1",
+            "database.db",
+        );
+        futures::executor::block_on(t);
+        return Ok(());
+    }
 
     if let Some(db_path) = args.build_database.as_ref() {
         if std::path::Path::new("database.db").exists() {
