@@ -1,71 +1,39 @@
+use anyhow::Result;
 use clap::Parser;
-use filetime::FileTime;
+//use filetime::FileTime;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
-use regex::Regex;
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use std::collections::HashMap;
-use std::fs::File;
-use std::io::BufReader;
-use std::io::Read;
-use std::io::Write;
-use std::os::raw::c_char;
-use std::sync::Mutex;
+//use regex::Regex;
+use rusqlite::{Connection, Statement};
+use sha2::Digest;
+use std::{collections::HashMap, io::Read, os::raw::c_char, sync::Mutex};
 use walkdir::WalkDir;
 
-fn get_files(path: &str) -> Vec<(String, i64)> {
+fn get_files(path: &str) -> Vec<String> {
     let spinner_style = ProgressStyle::with_template("{prefix:.bold.dim} {spinner} {wide_msg}")
         .unwrap()
         .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈ ");
 
     let pb = ProgressBar::new(0);
-    pb.set_style(spinner_style.clone());
+    pb.set_style(spinner_style);
     pb.set_prefix(format!("Fetching list of files... [{}/?]", 0));
 
-    let files: Vec<(String, i64)> = WalkDir::new(path)
+    let files: Vec<String> = WalkDir::new(path)
         .into_iter()
         .filter_map(|e| {
             let file = e.unwrap();
             let metadata = file.metadata().unwrap();
-            let mtime = FileTime::from_last_modification_time(&metadata);
 
             if let Some(filename) = file.path().to_str() {
-                if metadata.is_file() {
-                    return Some((file, mtime.seconds()));
+                if metadata.is_file() && !filename.ends_with(".listing") {
+                    pb.set_message(filename.to_owned());
+                    return Some(filename.to_owned());
                 }
             }
-
             None
-        })
-        .map(|(entry, time)| {
-            let filename = entry.into_path().to_str().unwrap().to_string();
-            pb.set_message(format!("{}", &filename));
-            //pb.inc(1);
-            (filename, time)
         })
         .collect();
     files
-}
-
-#[derive(Serialize, Clone, Deserialize, Hash, Eq, PartialEq, Default, Debug)]
-struct Hash {
-    v0: u64,
-    v1: u64,
-    v2: u64,
-    v3: u64,
-}
-
-fn get_u64_from_u8(data: &[u8]) -> u64 {
-    let mut o = 0u64;
-
-    for v in data {
-        let t = *v as u64;
-        o |= t;
-        o <<= 8;
-    }
-
-    o
 }
 
 #[repr(C)]
@@ -82,148 +50,95 @@ extern "C" {
     fn free_hash_data(data: *const CData);
 }
 
-#[derive(Clone, Serialize, Deserialize, Default)]
+#[derive(Clone, Default)]
 struct SongMetadata {
-    filename: String,
     sample_names: String,
-    artist: String,
-    comments: String,
-    channel_count: i32,
+    //artist: String,
+    //comments: String,
+    //channel_count: i32,
 }
 
 fn get_string_cstr(c: *const c_char) -> String {
     unsafe { std::ffi::CStr::from_ptr(c).to_string_lossy().into_owned() }
 }
 
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default)]
 struct TrackInfo {
-    timestamp: i64,
     pattern_hash: u64,
-    sha256_hash: Hash,
+    sha256_hash: String,
     filename: String,
     metadata: Option<SongMetadata>,
-}
-
-// Holds a cache of all the files so we don't need to rehash them all the time
-#[derive(Clone, Default, Serialize, Deserialize)]
-struct ModlandCache {
-    data: Vec<TrackInfo>,
-    /*
-    filename_to_data: HashMap<String, usize>,
-    sha256_to_data: HashMap<Hash, usize>,
-    pattern_hash_to_data: HashMap<u64, usize>,
-    */
 }
 
 /// Simple program to greet a person
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 struct Args {
-    /// Name of the person to greet
+    /// Builds a new database given a local directory
     #[clap(short, long)]
-    ignore_file_types: Vec<String>,
+    build_database: Option<String>,
 
-    // Make it possible to skip the database update in case you know it's up to date (only cache will be used)
+    /// Directory to match against the database. If not specificed the current directory will be used
     #[clap(short, long)]
-    skip_database_update: bool,
+    match_dir: Option<String>,
 
-    /// Path to local copy of the modland files
-    #[clap(short, long)]
-    database: String,
-
-    /// Search regex in samples
-    #[clap(short, long)]
-    match_sample: Option<String>,
+    /// Makes it possible to remove paths in the db with the matching results. For example --filter_paths "/incoming" will remove any matching against the "incoming" directory. To filter more than one path use "/path1,/path2"
+    #[clap(short, long, default_value = "")]
+    filter_paths: String,
 }
 
-/// Loads cache from disk if one exists and is then used
-fn load_cache_from_disk(filename: &str) -> Vec<TrackInfo> {
-    if let Ok(mut f) = File::open(filename) {
-        println!("Reading cache: {} to memory", filename);
-        let mut file_data = Vec::with_capacity(200 * 1024 * 1024);
-        f.read_to_end(&mut file_data).unwrap();
-        let decoded: Vec<TrackInfo> = bincode::deserialize(&file_data[..]).unwrap();
-        println!("Reading cache: {} to memory (done)", filename);
-        decoded
-    } else {
-        Vec::new()
+// Fetches info for a track/song
+fn get_track_info(filename: &str) -> TrackInfo {
+    let c_filename = std::ffi::CString::new(filename.as_bytes()).unwrap();
+    let song_data = unsafe { hash_file(c_filename.as_ptr()) };
+
+    // Calculate sha256 of the file
+    let mut file = std::fs::File::open(&filename).unwrap();
+    let mut file_data = Vec::new();
+    file.read_to_end(&mut file_data).unwrap();
+    let hash = sha2::Sha256::digest(&file_data);
+
+    let mut track_info = TrackInfo {
+        filename: filename.to_owned(),
+        sha256_hash: format!("{:x}", hash),
+        ..Default::default()
+    };
+
+    if !song_data.is_null() {
+        let hash_id = unsafe { (*song_data).hash };
+        let metadata = unsafe {
+            SongMetadata {
+                sample_names: get_string_cstr((*song_data).sample_names),
+                //artist: get_string_cstr((*song_data).artist),
+                //comments: get_string_cstr((*song_data).comments),
+                //channel_count: (*song_data).channel_count,
+            }
+        };
+
+        track_info.metadata = Some(metadata);
+        track_info.pattern_hash = hash_id;
+
+        unsafe { free_hash_data(song_data) };
     }
+
+    track_info
 }
 
 // Updates the database with new entries
-fn update_database(filepath: &str, existing_data: &mut Vec<TrackInfo>) -> bool {
+fn update_database(filepath: &str, conn: &Connection) {
     let files = get_files(filepath);
 
-    // Build a hashmap for matching existing files with timestamp. If timestamp is the same we assume the file is unchanged
-    let mut filename_timestamp_lookup = HashMap::with_capacity(existing_data.len());
-
-    for (index, track) in existing_data.iter().enumerate() {
-        filename_timestamp_lookup.insert(track.filename.to_owned(), (track.timestamp, index));
-    }
-
-    println!("Updating database");
-    let pb = ProgressBar::new(files.len() as _);
-    let data = Mutex::new(Vec::new());
+    println!("Hashing files");
+    let pb = ProgressBar::new((files.len() * 2) as _);
+    let data = Mutex::new(Vec::with_capacity(files.len()));
 
     files
         .par_iter()
         .enumerate()
         .for_each(|(_file_id, input_path)| {
-            let song_data;
-
-            // Check if the file has unchanged timestamp we assume it's unchanged and in the cache
-            if let Some(time_stamp) = filename_timestamp_lookup.get(&input_path.0) {
-                if time_stamp.0 == input_path.1 {
-                    pb.inc(1);
-                    return;
-                }
-            }
-
-            {
-                let c_filename = std::ffi::CString::new(input_path.0.as_bytes()).unwrap();
-                song_data = unsafe { hash_file(c_filename.as_ptr()) };
-            }
+            let track_info = get_track_info(input_path);
 
             pb.inc(1);
-
-            // Calculate sha256 of the file
-            let file = std::fs::File::open(&input_path.0).unwrap();
-            let mut reader = BufReader::new(file);
-            let mut sha256 = Sha256::new();
-            let mut file_data = Vec::new();
-            reader.read_to_end(&mut file_data).unwrap();
-            sha256.update(&file_data);
-            let hash = sha256.finalize();
-
-            let hash = Hash {
-                v0: get_u64_from_u8(&hash[0..7]),
-                v1: get_u64_from_u8(&hash[8..15]),
-                v2: get_u64_from_u8(&hash[16..23]),
-                v3: get_u64_from_u8(&hash[24..31]),
-            };
-
-            let mut track_info = TrackInfo::default();
-            track_info.filename = input_path.0.to_owned();
-            track_info.timestamp = input_path.1;
-            track_info.sha256_hash = hash;
-
-            if song_data != std::ptr::null() {
-                let hash_id = unsafe { (*song_data).hash };
-                let metadata = unsafe {
-                    SongMetadata {
-                        filename: input_path.0.to_owned(),
-                        sample_names: get_string_cstr((*song_data).sample_names),
-                        artist: get_string_cstr((*song_data).artist),
-                        comments: get_string_cstr((*song_data).comments),
-                        channel_count: (*song_data).channel_count,
-                    }
-                };
-
-                track_info.metadata = Some(metadata);
-                track_info.pattern_hash = hash_id;
-
-                unsafe { free_hash_data(song_data) };
-            }
 
             {
                 let mut tracks = data.lock().unwrap();
@@ -233,36 +148,46 @@ fn update_database(filepath: &str, existing_data: &mut Vec<TrackInfo>) -> bool {
 
     let new_data = data.lock().unwrap();
 
-    // if data was epmty we just push the newly generated data into it
+    let mut hash_only_stmt = conn
+        .prepare("INSERT INTO data (filehash, path) VALUES (:filehash, :path)")
+        .unwrap();
 
-    if existing_data.is_empty() {
-        *existing_data = new_data.clone();
-        true
-    } else if !new_data.is_empty() {
-        // loop over the new entries or either update them or add new entries
-        for e in &*new_data {
-            // check if entry was found in existing data, if so we update with the new data
-            if let Some(time_stamp) = filename_timestamp_lookup.get(&e.filename) {
-                existing_data[time_stamp.1] = e.clone();
-            } else {
-                // otherwise push to the list
-                existing_data.push(e.clone());
-            }
+    let mut stmt = conn
+        .prepare("INSERT INTO data (filehash, pattern_hash, samples, path) VALUES (:filehash, :pattern_hash, :samples, :path)")
+        .unwrap();
+
+    conn.execute("BEGIN", []).unwrap();
+
+    // Updating database
+    for e in &*new_data {
+        let filename = e.filename.replace(filepath, "");
+        if let Some(metadata) = e.metadata.as_ref() {
+            stmt.execute(&[
+                (":filehash", &e.sha256_hash),
+                (":pattern_hash", &e.pattern_hash.to_string()),
+                (":samples", &metadata.sample_names),
+                (":path", &filename),
+            ])
+            .unwrap();
+        } else {
+            hash_only_stmt
+                .execute(&[(":filehash", &e.sha256_hash), (":path", &filename)])
+                .unwrap();
         }
 
-        true
-    } else {
-        false
+        pb.inc(1);
     }
-}
 
-fn search_for_sample_name(search_string: &str, tracks: &[TrackInfo]) {
+    conn.execute("COMMIT", []).unwrap();
+}
+// tetsehou{
+/*
     let re = Regex::new(search_string).unwrap();
     let mut count = 0;
 
     tracks.iter().for_each(|track| {
         if let Some(metadata) = track.metadata.as_ref() {
-            if re.is_match(&metadata.sample_names) {
+            if re.is_match(&metadata.sample_names.to_ascii_lowercase()) {
                 println!("===============================================================");
                 println!("Matching {}", track.filename);
                 println!("{}", metadata.sample_names);
@@ -273,32 +198,144 @@ fn search_for_sample_name(search_string: &str, tracks: &[TrackInfo]) {
 
     println!("Total matches {}", count);
 }
+     */
 
-// tetsehou
-fn main() {
-    let args = Args::parse();
-    let cache_filename = "cache.bin";
+fn get_files_from_sha_hash(info: &TrackInfo, stmt: &mut Statement) -> Vec<String> {
+    let rows = stmt
+        .query_map(&[(":id", &info.sha256_hash)], |row| row.get(0))
+        .unwrap();
 
-    let mut track_info = load_cache_from_disk(cache_filename);
+    let mut names = Vec::new();
+    for name_result in rows {
+        names.push(name_result.unwrap());
+    }
 
-    if !args.skip_database_update {
-        let is_updated = update_database(&args.database, &mut track_info);
+    names
+}
 
-        // store new cache in case it was updated
-        if is_updated {
-            println!("Database has been updated. Storing cache...");
-            let encoded: Vec<u8> = bincode::serialize(&track_info).unwrap();
-            let mut cache = File::create(cache_filename).unwrap();
-            cache.write_all(&encoded).unwrap();
-            println!("Database has been updated. Storing cache... (Done)");
+fn get_files_from_pattern_hash(info: &TrackInfo, stmt: &mut Statement) -> Vec<String> {
+    let rows = stmt
+        .query_map(&[(":id", &info.pattern_hash.to_string())], |row| row.get(0))
+        .unwrap();
+
+    let mut names = Vec::new();
+    for name_result in rows {
+        names.push(name_result.unwrap());
+    }
+
+    names
+}
+
+fn filter_names(names: &[String], dir_filters: &str) -> Vec<String> {
+    let filter_paths = dir_filters.split(',');
+    let mut output = Vec::new();
+
+    for t in filter_paths {
+        for filename in names {
+            if !filename.starts_with(t) || t.is_empty() {
+                output.push(filename.to_owned());
+                break;
+            }
         }
     }
 
-    if let Some(match_sample) = args.match_sample {
-        search_for_sample_name(&match_sample, &track_info);
-        return;
+    output
+}
+
+fn match_dir_against_db(dir: &str, dir_filters: &str, db: &Connection) {
+    let files = get_files(dir);
+
+    let mut stmt = db
+        .prepare("SELECT path FROM data where filehash = :id")
+        .unwrap();
+
+    let mut pattern_stmt = db
+        .prepare("SELECT path FROM data where pattern_hash = :id")
+        .unwrap();
+
+    for filename in &files {
+        let info = get_track_info(filename);
+        println!("Matching {}", info.filename);
+
+        let filenames = get_files_from_sha_hash(&info, &mut stmt);
+        let filenames_pattern = get_files_from_pattern_hash(&info, &mut pattern_stmt);
+
+        let filenames = filter_names(&filenames, dir_filters);
+        let filenames_pattern = filter_names(&filenames_pattern, dir_filters);
+
+        let mut found_entries = HashMap::new();
+
+        for filename in &filenames {
+            found_entries.insert(filename.to_owned(), (true, false));
+        }
+
+        for filename in &filenames_pattern {
+            if let Some(v) = found_entries.get_mut(filename) {
+                v.1 = true;
+            } else {
+                found_entries.insert(filename.to_owned(), (false, true));
+            }
+        }
+
+        for found in &found_entries {
+            let url = found.0.replace(" ", "%20");
+            let url = format!("https://ftp.modland.com{}", url);
+            if found.1 .0 && found.1 .1 {
+                println!("Found match {} (hash) (pattern_hash)", url);
+            } else if found.1 .0 && !found.1 .1 {
+                println!("Found match {} (hash)", url);
+            } else {
+                println!("Found match {} (pattern_hash)", url);
+            }
+        }
+
+        if found_entries.is_empty() {
+            println!("No matches found!");
+        }
+
+        println!();
     }
 }
+
+fn main() -> Result<()> {
+    let args = Args::parse();
+    let conn;
+
+    if let Some(db_path) = args.build_database.as_ref() {
+        if std::path::Path::new("database.db").exists() {
+            std::fs::remove_file("database.db").unwrap();
+        }
+
+        conn = Connection::open("database.db").unwrap();
+        conn.execute(
+            "
+            CREATE TABLE data (
+                path TEXT NOT_NUL,
+                filehash TEXT NOT NULL,
+                pattern_hash INTEGER,
+                samples TEXT,
+                PRIMARY KEY (path, filehash, pattern_hash)
+            )",
+            [], // empty list of parameters.
+        )?;
+
+        update_database(db_path, &conn);
+    } else {
+        conn = Connection::open("database.db")?;
+    }
+
+    if let Some(match_dir) = args.match_dir.as_ref() {
+        match_dir_against_db(match_dir, &args.filter_paths, &conn);
+    } else {
+        match_dir_against_db(".", &args.filter_paths, &conn);
+    }
+
+    Ok(())
+}
+
+/*
+"
+*/
 
 /*
 let mut output = String::with_capacity(10 * 1024 * 1024);
@@ -313,17 +350,7 @@ for (_key, val) in map.iter() {
     if val.len() > 1 {
         dupe_array.push(val);
     }
-}
-
-dupe_array.sort_by(|a, b| a[0].filename.cmp(&b[0].filename));
-
-for val in dupe_array {
-    let mut found_unknown = false;
-
-    for t in val {
-        if t.filename.contains("- unknown") {
-            found_unknown = true;
-        }
+}open_in_memory
 
         if t.filename.contains("pub/favourites") {
             found_unknown = false;
@@ -348,19 +375,21 @@ for val in dupe_array {
 }
 */
 
+/*
 static HTML_HEADER: &str =
     "<html xmlns=\"http://www.w3.org/1999/xhtml\" xml:lang=\"en\" lang=\"en\">
 <head>
-	<style type=\"text/css\" media=\"screen\">
-		body {Write;
-			border: 1px solid #999;
-			display: block;
-			padding: 20px;
-		}
-	</style>
+    <style type=\"text/css\" media=\"screen\">
+        body {Write;
+            border: 1px solid #999;
+            display: block;
+            padding: 20px;
+        }
+    </style>
 </head>
 
 ";
+ */
 
 /*
 let mut data = Vec::new();

@@ -12,10 +12,10 @@ walkdir = "2"
 cc = { version = "1.0", features = ["parallel"] }
 
 [dependencies]
-regex = "1.5"
-bincode = "1.3"
+anyhow = "1.0"
+rusqlite = { version = "0.27.0", features = ["bundled"] }
 filetime = "0.2"
-serde = { version = "1.0", features = ["derive"] }
+regex = "1.5"
 clap = { version = "3.1.6", features = ["derive"] }
 indicatif = "0.17.0-rc.8"
 walkdir = "2"
