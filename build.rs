@@ -35,10 +35,9 @@ fn main() {
     build.include("external/libopenmpt/common");
 
     if env.contains("windows") {
-        //
+        build.flag("/std:c++latest");
     } else if env.contains("darwin") {
         build.flag("-std=c++17"); 
-        //
     } else {
         build.flag("-std=c++17");
         build.cpp_link_stdlib("stdc++");
@@ -60,7 +59,7 @@ fn main() {
 
     // linker stuff
     if env.contains("windows") {
-        // todo fixme
+        println!("cargo:rustc-link-lib=Rpcrt4");
     } else if env.contains("darwin") {
         println!("cargo:rustc-link-lib=c++");
     } else {
