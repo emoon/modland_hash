@@ -327,7 +327,7 @@ fn match_dir_against_db(dir: &str, dir_filters: &str, db: &Connection) {
         );
          */
 
-        println!("Matching {}" info.filename);
+        println!("Matching {}", info.filename);
 
         let filenames = get_files_from_sha_hash(&info, &mut stmt);
         let filenames_pattern = get_files_from_pattern_hash(&info, &mut pattern_stmt);
