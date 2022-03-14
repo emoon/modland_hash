@@ -10,8 +10,7 @@ use std::{
     cmp::min, collections::HashMap, fs::File, io::Read, io::Write, os::raw::c_char, sync::Mutex,
 };
 
-use futures_util::{StreamExt, TryFutureExt};
-use reqwest::Client;
+//use reqwest::Client;
 use walkdir::WalkDir;
 
 fn get_files(path: &str) -> Vec<String> {
@@ -190,6 +189,7 @@ fn update_database(filepath: &str, conn: &Connection) {
     conn.execute("COMMIT", []).unwrap();
 }
 
+/*
 async fn download(client: &Client, url: &str, path: &str) {
     let foo = download_file(client, url, path).await.unwrap();
 }
@@ -232,7 +232,8 @@ pub async fn download_file(client: &Client, url: &str, path: &str) -> Result<(),
     Ok(())
 }
 
-// tetsehou{
+ */
+
 /*
     let re = Regex::new(search_string).unwrap();
     let mut count = 0;
@@ -358,11 +359,12 @@ fn match_dir_against_db(dir: &str, dir_filters: &str, db: &Connection) {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+//#[tokio::main]
+fn main() -> Result<()> {
     let args = Args::parse();
     let conn;
 
+    /*
     if args.download_database {
         let client = reqwest::Client::new();
         let t = download(
@@ -373,6 +375,7 @@ async fn main() -> Result<()> {
         futures::executor::block_on(t);
         return Ok(());
     }
+     */
 
     if let Some(db_path) = args.build_database.as_ref() {
         if std::path::Path::new("database.db").exists() {
