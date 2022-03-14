@@ -170,9 +170,10 @@ fn update_database(filepath: &str, conn: &Connection) {
     for e in &*new_data {
         let filename = e.filename.replace(filepath, "");
         if let Some(metadata) = e.metadata.as_ref() {
+            let pattern_hash = format!("{:x}", e.pattern_hash);
             stmt.execute(&[
                 (":filehash", &e.sha256_hash),
-                (":pattern_hash", &e.pattern_hash.to_string()),
+                (":pattern_hash", &pattern_hash),
                 (":samples", &metadata.sample_names),
                 (":path", &filename),
             ])
@@ -267,8 +268,9 @@ fn get_files_from_sha_hash(info: &TrackInfo, stmt: &mut Statement) -> Vec<String
 }
 
 fn get_files_from_pattern_hash(info: &TrackInfo, stmt: &mut Statement) -> Vec<String> {
+    let hash_id = format!("{:x}", info.pattern_hash);
     let rows = stmt
-        .query_map(&[(":id", &info.pattern_hash.to_string())], |row| row.get(0))
+        .query_map(&[(":id", &hash_id)], |row| row.get(0))
         .unwrap();
 
     let mut names = Vec::new();
@@ -318,10 +320,14 @@ fn match_dir_against_db(dir: &str, dir_filters: &str, db: &Connection) {
     for filename in &files {
         let info = get_track_info(filename);
 
+        /*
         println!(
             "Matching {} sha [{}] pattern_hash [{:x}]",
             info.filename, info.sha256_hash, info.pattern_hash
         );
+         */
+
+        println!("Matching {}" info.filename);
 
         let filenames = get_files_from_sha_hash(&info, &mut stmt);
         let filenames_pattern = get_files_from_pattern_hash(&info, &mut pattern_stmt);
@@ -392,7 +398,7 @@ fn main() -> Result<()> {
             CREATE TABLE data (
                 path TEXT NOT_NUL,
                 filehash TEXT NOT NULL,
-                pattern_hash INTEGER,
+                pattern_hash TEXT,
                 samples TEXT,
                 PRIMARY KEY (path, filehash, pattern_hash)
             )",
