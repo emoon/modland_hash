@@ -1,19 +1,39 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::Parser;
-//use filetime::FileTime;
+use flate2::{read::ZlibDecoder, write::ZlibEncoder, Compression};
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
+use simple_logger::SimpleLogger;
 //use regex::Regex;
-use rusqlite::{Connection, Statement};
 use sha2::Digest;
 use std::{
-    cmp::min, collections::HashMap, fs::File, io::Read, io::Write, os::raw::c_char, sync::Mutex,
+    collections::HashMap,
+    fs::File,
+    hash::{Hash, Hasher},
+    io::{Read, Write},
+    os::raw::c_char,
+    path::{Path, PathBuf},
+    sync::Mutex,
 };
 
-//use reqwest::Client;
+static DB_FILENAME: &str = "modland_hash.db";
+static DB_REMOTE: &str = "https://www.dropbox.com/s/o5z6ffnyl7zzoo0/modland_hash.db?dl=1";
+static DB_VERSION: u32 = (0 << 16) | (0 << 8) | 1; // Version of database that has to match. (0.0.1)
+static DB_SIZE: usize = 700_0000;
+
 use walkdir::WalkDir;
 
+// Get files for a given directory
 fn get_files(path: &str) -> Vec<String> {
+    if !Path::new(path).exists() {
+        println!(
+            "Path \"{}\" doesn't exist. No files will be processed.",
+            path
+        );
+        return Vec::new();
+    }
+
     let spinner_style = ProgressStyle::with_template("{prefix:.bold.dim} {spinner} {wide_msg}")
         .unwrap()
         .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈ ");
@@ -50,16 +70,8 @@ struct CData {
 }
 
 extern "C" {
-    fn hash_file(filename: *const i8) -> *const CData;
+    fn hash_file(data: *const u8, len: u32) -> *const CData;
     fn free_hash_data(data: *const CData);
-}
-
-#[derive(Clone, Default)]
-struct SongMetadata {
-    sample_names: String,
-    //artist: String,
-    //comments: String,
-    //channel_count: i32,
 }
 
 fn get_string_cstr(c: *const c_char) -> String {
@@ -71,7 +83,44 @@ struct TrackInfo {
     pattern_hash: u64,
     sha256_hash: String,
     filename: String,
-    metadata: Option<SongMetadata>,
+    sample_names: String,
+}
+
+#[derive(Default, Debug, Serialize, Deserialize)]
+struct DatabaseMeta {
+    filename: String,
+    samples: String,
+}
+
+impl PartialEq for DatabaseMeta {
+    fn eq(&self, other: &Self) -> bool {
+        self.filename == other.filename
+    }
+}
+
+impl Hash for DatabaseMeta {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.filename.hash(state);
+    }
+}
+
+impl Eq for DatabaseMeta {}
+
+#[derive(Default, Serialize, Deserialize)]
+struct Database {
+    metadata: Vec<DatabaseMeta>,
+    sha_hash: HashMap<String, Vec<usize>>,
+    pattern_hash: HashMap<u64, Vec<usize>>,
+}
+
+impl Database {
+    fn new(size: usize) -> Database {
+        Database {
+            metadata: Vec::with_capacity(size),
+            sha_hash: HashMap::with_capacity(size),
+            pattern_hash: HashMap::with_capacity(size),
+        }
+    }
 }
 
 /// Simple program to greet a person
@@ -90,6 +139,10 @@ struct Args {
     #[clap(short, long)]
     match_dir: Option<String>,
 
+    /// Makes it possible to print sample names if pattern hash mismatches
+    #[clap(short, long)]
+    print_samples_pattern_hash: bool,
+
     /// Makes it possible to remove paths in the db with the matching results. For example --filter_paths "/incoming" will remove any matching against the "incoming" directory. To filter more than one path use "/path1,/path2"
     #[clap(short, long, default_value = "")]
     filter_paths: String,
@@ -97,14 +150,13 @@ struct Args {
 
 // Fetches info for a track/song
 fn get_track_info(filename: &str) -> TrackInfo {
-    let c_filename = std::ffi::CString::new(filename.as_bytes()).unwrap();
-    let song_data = unsafe { hash_file(c_filename.as_ptr()) };
-
     // Calculate sha256 of the file
     let mut file = File::open(&filename).unwrap();
     let mut file_data = Vec::new();
     file.read_to_end(&mut file_data).unwrap();
     let hash = sha2::Sha256::digest(&file_data);
+
+    let song_data = unsafe { hash_file(file_data.as_ptr(), file_data.len() as _) };
 
     let mut track_info = TrackInfo {
         filename: filename.to_owned(),
@@ -114,16 +166,8 @@ fn get_track_info(filename: &str) -> TrackInfo {
 
     if !song_data.is_null() {
         let hash_id = unsafe { (*song_data).hash };
-        let metadata = unsafe {
-            SongMetadata {
-                sample_names: get_string_cstr((*song_data).sample_names),
-                //artist: get_string_cstr((*song_data).artist),
-                //comments: get_string_cstr((*song_data).comments),
-                //channel_count: (*song_data).channel_count,
-            }
-        };
-
-        track_info.metadata = Some(metadata);
+        let sample_names = unsafe { get_string_cstr((*song_data).sample_names) };
+        track_info.sample_names = sample_names;
         track_info.pattern_hash = hash_id;
 
         unsafe { free_hash_data(song_data) };
@@ -132,108 +176,205 @@ fn get_track_info(filename: &str) -> TrackInfo {
     track_info
 }
 
+// Check that database version is valid
+fn is_valid_db_version<P: AsRef<Path>>(path: P) -> Result<bool> {
+    let mut version: [u8; 4] = [0; 4];
+
+    log::trace!("Loading Database... [Reading]");
+
+    let mut file = File::open(path)?;
+    file.read(&mut version)?;
+
+    let v = ((version[0] as u32) << 24)
+        | ((version[1] as u32) << 16)
+        | ((version[2] as u32) << 8)
+        | ((version[3] as u32) << 0);
+
+    if v == DB_VERSION {
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+// Get the target filename
+fn get_db_filename() -> String {
+    let p = std::env::current_exe().unwrap();
+    let path = Path::new(&p);
+    let path = path.parent().unwrap().join(DB_FILENAME);
+    path.into_os_string().into_string().unwrap()
+}
+
 // Updates the database with new entries
-fn update_database(filepath: &str, conn: &Connection) {
-    let files = get_files(filepath);
+fn build_database(out_filename: &str, database_path: &str) {
+    let files = get_files(database_path);
 
-    println!("Hashing files");
-    let pb = ProgressBar::new((files.len() * 2) as _);
-    let data = Mutex::new(Vec::with_capacity(files.len()));
+    let spinner_style =
+        ProgressStyle::with_template("{prefix:.bold.dim} {wide_bar} {pos}/{len}").unwrap();
 
-    files
-        .par_iter()
-        .enumerate()
-        .for_each(|(_file_id, input_path)| {
-            let track_info = get_track_info(input_path);
+    let pb = ProgressBar::new(files.len() as _);
+    pb.set_style(spinner_style);
 
-            pb.inc(1);
+    //let database = Mutex::new(Database::new(DB_SIZE));
+    let tracks_mt = Mutex::new(Vec::with_capacity(DB_SIZE));
+    pb.set_prefix("Hashing files");
 
-            {
-                let mut tracks = data.lock().unwrap();
-                tracks.push(track_info);
-            }
-        });
+    files.par_iter().for_each(|input_path| {
+        let mut track = get_track_info(input_path);
+        track.filename = input_path.replace(database_path, "");
 
-    let new_data = data.lock().unwrap();
-
-    let mut hash_only_stmt = conn
-        .prepare("INSERT INTO data (filehash, path) VALUES (:filehash, :path)")
-        .unwrap();
-
-    let mut stmt = conn
-        .prepare("INSERT INTO data (filehash, pattern_hash, samples, path) VALUES (:filehash, :pattern_hash, :samples, :path)")
-        .unwrap();
-
-    conn.execute("BEGIN", []).unwrap();
-
-    // Updating database
-    for e in &*new_data {
-        let filename = e.filename.replace(filepath, "");
-        if let Some(metadata) = e.metadata.as_ref() {
-            let pattern_hash = format!("{:x}", e.pattern_hash);
-            stmt.execute(&[
-                (":filehash", &e.sha256_hash),
-                (":pattern_hash", &pattern_hash),
-                (":samples", &metadata.sample_names),
-                (":path", &filename),
-            ])
-            .unwrap();
-        } else {
-            hash_only_stmt
-                .execute(&[(":filehash", &e.sha256_hash), (":path", &filename)])
-                .unwrap();
+        {
+            let mut tracks = tracks_mt.lock().unwrap();
+            tracks.push(track);
         }
 
         pb.inc(1);
+    });
+
+    println!("Writing database to disk... [Encoding]");
+
+    let tracks = tracks_mt.lock().unwrap();
+    let mut db = Database::new(DB_SIZE);
+
+    for (index, track) in tracks.iter().enumerate() {
+        if let Some(t) = db.sha_hash.get_mut(&track.sha256_hash) {
+            t.push(index);
+        } else {
+            db.sha_hash
+                .insert(track.sha256_hash.to_owned(), vec![index]);
+        }
+
+        if track.pattern_hash != 0 {
+            if let Some(t) = db.pattern_hash.get_mut(&track.pattern_hash) {
+                t.push(index);
+            } else {
+                db.pattern_hash.insert(track.pattern_hash, vec![index]);
+            }
+
+            db.metadata.push(DatabaseMeta {
+                filename: track.filename.to_owned(),
+                samples: track.sample_names.to_owned(),
+            });
+        } else {
+            db.metadata.push(DatabaseMeta {
+                filename: track.filename.to_owned(),
+                samples: String::new(),
+            });
+        }
     }
 
-    conn.execute("COMMIT", []).unwrap();
+    //let db = database.lock().unwrap();
+    let encoded: Vec<u8> = bincode::serialize(&db).unwrap();
+
+    println!("Writing database to disk... [Compressing]");
+
+    let mut e = ZlibEncoder::new(Vec::new(), Compression::best());
+    e.write_all(&encoded).unwrap();
+    let compressed_bytes = e.finish().unwrap();
+
+    println!("Writing database to disk... [Writing]");
+
+    let database_version = [
+        (DB_VERSION >> 24) as u8,
+        (DB_VERSION >> 16) as u8,
+        (DB_VERSION >> 8) as u8,
+        (DB_VERSION >> 0) as u8,
+    ];
+
+    let mut file = File::create(out_filename).unwrap();
+    file.write_all(&database_version).unwrap();
+    file.write_all(&compressed_bytes).unwrap();
+
+    println!("Writing database to disk... [Done]");
 }
 
-/*
-async fn download(client: &Client, url: &str, path: &str) {
-    let foo = download_file(client, url, path).await.unwrap();
+fn create_db_file() -> Result<File> {
+    let filename = get_db_filename();
+
+    if let Ok(file) = File::create(&filename) {
+        return Ok(file);
+    }
+
+    bail!(
+        "Tried to create database at {} but was unable to do so. Manually download {} and place it next to the modland_has executable",
+        filename, DB_REMOTE,
+    )
 }
 
-pub async fn download_file(client: &Client, url: &str, path: &str) -> Result<(), String> {
-    // Reqwest setup
-    let res = client
-        .get(url)
-        .send()
-        .await
-        .or(Err(format!("Failed to GET from '{}'", &url)))?;
-    let total_size = res
-        .content_length()
-        .ok_or(format!("Failed to get content length from '{}'", &url))?;
+// Download the remote file
+fn download_db_err() -> Result<()> {
+    let mut file = create_db_file()?;
 
-    // Indicatif setup
-    let pb = ProgressBar::new(total_size);
-    pb.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+    let resp = ureq::get(DB_REMOTE).call()?;
+    let len: usize = resp.header("Content-Length").unwrap().parse()?;
+
+    let mut temp_buffer: [u8; 1024] = [0; 1024];
+    let mut reader = resp.into_reader();
+
+    let pb = ProgressBar::new(len as _);
+    pb.set_style(
+        ProgressStyle::with_template(
+            "{prefix:.bold.dim} {spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes}",
+        )
         .unwrap()
         .with_key("eta", |state| format!("{:.1}s", state.eta().as_secs_f64()))
-        .progress_chars("#>-"));
+        .progress_chars("#>-"),
+    );
 
-    pb.set_message(format!("Downloading {}", url));
+    pb.set_prefix("Downloading Database");
 
-    // download chunks
-    let mut file = File::create(path).or(Err(format!("Failed to create file '{}'", path)))?;
-    let mut downloaded: u64 = 0;
-    let mut stream = res.bytes_stream();
+    let mut pos = 0;
 
-    while let Some(item) = stream.next().await {
-        let chunk = item.or(Err(format!("Error while downloading file")))?;
-        file.write_all(&chunk)
-            .or(Err(format!("Error while writing to file")))?;
-        let new = min(downloaded + (chunk.len() as u64), total_size);
-        downloaded = new;
-        pb.set_position(new);
+    loop {
+        let read_size = reader.read(&mut temp_buffer)?;
+
+        if read_size == 0 {
+            break;
+        }
+
+        pb.set_position(pos);
+        pos += read_size as u64;
+
+        file.write_all(&temp_buffer[0..read_size])?;
     }
 
-    pb.finish_with_message(format!("Downloaded {} to {}", url, path));
     Ok(())
 }
 
- */
+fn download_db() {
+    match download_db_err() {
+        Err(_) => {
+            println!("Unable to download database. Download {} manually and place it next to the executable.", DB_REMOTE);
+            std::process::exit(1);
+        }
+        _ => (),
+    }
+}
+
+fn load_database(filename: &str) -> Result<Database> {
+    let mut data = Vec::new();
+    let mut decompressed_data = Vec::new();
+    let mut version: [u8; 4] = [0, 0, 0, 0];
+
+    log::trace!("Loading Database... {} [Reading]", filename);
+
+    let mut file = std::fs::File::open(filename)?;
+    file.read(&mut version)?;
+
+    // TODO: check version
+    file.read_to_end(&mut data)?;
+
+    log::trace!("Loading Database... [Decompressing]");
+
+    let mut z = ZlibDecoder::new(&data[..]);
+    z.read_to_end(&mut decompressed_data)?;
+
+    log::trace!("Loading Database... [Unencoding]");
+
+    let datbase: Database = bincode::deserialize(&decompressed_data[..])?;
+
+    Ok(datbase)
+}
 
 /*
     let re = Regex::new(search_string).unwrap();
@@ -254,39 +395,38 @@ pub async fn download_file(client: &Client, url: &str, path: &str) -> Result<(),
 }
      */
 
-fn get_files_from_sha_hash(info: &TrackInfo, stmt: &mut Statement) -> Vec<String> {
-    let rows = stmt
-        .query_map(&[(":id", &info.sha256_hash)], |row| row.get(0))
-        .unwrap();
+fn get_files_from_sha_hash<'a>(info: &TrackInfo, lookup: &'a Database) -> Vec<&'a DatabaseMeta> {
+    let mut entries = Vec::new();
 
-    let mut names = Vec::new();
-    for name_result in rows {
-        names.push(name_result.unwrap());
+    if let Some(res) = lookup.sha_hash.get(&info.sha256_hash) {
+        for v in res {
+            entries.push(&lookup.metadata[*v]);
+        }
     }
 
-    names
+    entries
 }
 
-fn get_files_from_pattern_hash(info: &TrackInfo, stmt: &mut Statement) -> Vec<String> {
-    let hash_id = format!("{:x}", info.pattern_hash);
-    let rows = stmt
-        .query_map(&[(":id", &hash_id)], |row| row.get(0))
-        .unwrap();
-
-    let mut names = Vec::new();
-    for name_result in rows {
-        names.push(name_result.unwrap());
+fn get_files_from_pattern_hash<'a>(
+    info: &TrackInfo,
+    lookup: &'a Database,
+) -> Vec<&'a DatabaseMeta> {
+    let mut entries = Vec::new();
+    if let Some(res) = lookup.pattern_hash.get(&info.pattern_hash) {
+        for v in res {
+            entries.push(&lookup.metadata[*v]);
+        }
     }
 
-    names
+    entries
 }
 
-fn filter_names<'a>(names: &[String], dir_filters: &str) -> Vec<String> {
+fn filter_names<'a>(names: &[&'a DatabaseMeta], dir_filters: &str) -> Vec<&'a DatabaseMeta> {
     let mut output = Vec::new();
 
     if dir_filters.is_empty() {
         for f in names {
-            output.push(f.to_owned());
+            output.push(*f);
         }
 
         return output;
@@ -295,9 +435,9 @@ fn filter_names<'a>(names: &[String], dir_filters: &str) -> Vec<String> {
     let filter_paths = dir_filters.split(',');
 
     for t in filter_paths {
-        for filename in names {
-            if !filename.starts_with(t) {
-                output.push(filename.to_owned());
+        for meta in names {
+            if !meta.filename.starts_with(t) {
+                output.push(*meta);
                 break;
             }
         }
@@ -306,56 +446,95 @@ fn filter_names<'a>(names: &[String], dir_filters: &str) -> Vec<String> {
     output
 }
 
-fn match_dir_against_db(dir: &str, dir_filters: &str, db: &Connection) {
+/*
+fn print_samples(samples: &str) {
+    println!("{}", samples);
+}
+*/
+
+fn print_samples_with_outline(samples: &str) {
+    // figure out the max len of the lines
+    let mut max_len = 0;
+    for line in samples.lines() {
+        max_len = std::cmp::max(line.len(), max_len);
+    }
+
+    // spacing on each side
+    max_len += 2;
+
+    print!("┌");
+
+    for _in in 0..max_len {
+        print!("─");
+    }
+
+    println!("┐");
+
+    for line in samples.lines() {
+        print!("│ ");
+        print!("{}", line);
+
+        for _ in line.len()..max_len - 1 {
+            print!(" ");
+        }
+
+        println!("│");
+    }
+
+    print!("└");
+    for _in in 0..max_len {
+        print!("─");
+    }
+
+    println!("┘");
+}
+
+fn match_dir_against_db(dir: &str, args: &Args, lookup: &Database) {
     let files = get_files(dir);
 
-    let mut stmt = db
-        .prepare("SELECT path FROM data where filehash = :id")
-        .unwrap();
-
-    let mut pattern_stmt = db
-        .prepare("SELECT path FROM data where pattern_hash = :id")
-        .unwrap();
-
-    for filename in &files {
+    //files.par_iter().for_each(|filename| {
+    files.iter().for_each(|filename| {
         let info = get_track_info(filename);
+        let mut output = String::new();
 
-        /*
-        println!(
-            "Matching {} sha [{}] pattern_hash [{:x}]",
-            info.filename, info.sha256_hash, info.pattern_hash
-        );
-         */
+        println!("Matching {}", filename);
 
-        println!("Matching {}", info.filename);
+        let filenames = get_files_from_sha_hash(&info, lookup);
+        let filenames_pattern = get_files_from_pattern_hash(&info, lookup);
 
-        let filenames = get_files_from_sha_hash(&info, &mut stmt);
-        let filenames_pattern = get_files_from_pattern_hash(&info, &mut pattern_stmt);
-
-        let filenames = filter_names(&filenames, dir_filters);
-        let filenames_pattern = filter_names(&filenames_pattern, dir_filters);
+        let filenames = filter_names(&filenames, &args.filter_paths);
+        let filenames_pattern = filter_names(&filenames_pattern, &args.filter_paths);
 
         let mut found_entries = HashMap::new();
 
-        for filename in &filenames {
-            found_entries.insert(filename.to_owned(), (true, false));
+        for entry in &filenames {
+            found_entries.insert(*entry, (true, false));
         }
 
-        for filename in &filenames_pattern {
-            if let Some(v) = found_entries.get_mut(filename) {
+        for entry in &filenames_pattern {
+            if let Some(v) = found_entries.get_mut(*entry) {
                 v.1 = true;
             } else {
-                found_entries.insert(filename.to_owned(), (false, true));
+                found_entries.insert(entry, (false, true));
             }
         }
 
+        let mut printed_initial_samples = false;
+
         for found in &found_entries {
-            let url = found.0.replace(" ", "%20");
+            let url = found.0.filename.replace(" ", "%20");
             let url = format!("https://ftp.modland.com{}", url);
             if found.1 .0 && found.1 .1 {
                 println!("Found match {} (hash) (pattern_hash)", url);
             } else if found.1 .0 && !found.1 .1 {
                 println!("Found match {} (hash)", url);
+            } else if args.print_samples_pattern_hash {
+                if !printed_initial_samples && args.print_samples_pattern_hash {
+                    print_samples_with_outline(&info.sample_names);
+                    printed_initial_samples = true;
+                }
+                println!("Found match {} (pattern_hash)", url);
+                print_samples_with_outline(&found.0.samples);
             } else {
                 println!("Found match {} (pattern_hash)", url);
             }
@@ -366,62 +545,70 @@ fn match_dir_against_db(dir: &str, dir_filters: &str, db: &Connection) {
         }
 
         println!();
-    }
+
+        output.push_str(&format!("Matching {}", filename));
+    });
 }
 
-//#[tokio::main]
+// First check if we have a database next to the to the exe, otherwise try local directory
+fn check_for_db_file() -> Option<PathBuf> {
+    let path = Path::new(&get_db_filename()).to_path_buf();
+    if path.exists() {
+        return Some(path);
+    } else {
+    }
+
+    None
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
-    let conn;
+    SimpleLogger::new()
+        .with_level(log::LevelFilter::Off)
+        .init()?;
 
-    /*
-    if args.download_database {
-        let client = reqwest::Client::new();
-        let t = download(
-            &client,
-            "https://www.dropbox.com/s/mpi7212hplodyav/modland_hash.zip?dl=1",
-            "database.db",
-        );
-        futures::executor::block_on(t);
-        return Ok(());
-    }
-     */
+    // first we check if we have a database and if we don't we try to download it we don't
+    // or if the database version doesn't match
 
     if let Some(db_path) = args.build_database.as_ref() {
-        if std::path::Path::new("database.db").exists() {
-            std::fs::remove_file("database.db").unwrap();
+        let filename = get_db_filename();
+
+        if std::path::Path::new(&filename).exists() {
+            std::fs::remove_file(&filename).unwrap();
         }
 
-        conn = Connection::open("database.db").unwrap();
-        conn.execute(
-            "
-            CREATE TABLE data (
-                path TEXT NOT_NUL,
-                filehash TEXT NOT NULL,
-                pattern_hash TEXT,
-                samples TEXT,
-                PRIMARY KEY (path, filehash, pattern_hash)
-            )",
-            [], // empty list of parameters.
-        )?;
+        build_database(&filename, db_path);
 
-        update_database(db_path, &conn);
-    } else {
-        conn = Connection::open("database.db")?;
+        return Ok(());
     }
 
+    let database_path = check_for_db_file();
+
+    if args.download_database || database_path.is_none() {
+        download_db();
+    }
+
+    if let Some(path) = database_path {
+        if !is_valid_db_version(path)? {
+            println!("Database version doesn't match executable. Downloading");
+            download_db();
+        }
+    }
+
+    println!("Loading database...");
+
+    let database = load_database(&get_db_filename()).unwrap();
+
+    println!("Loading database... [Done]\n");
+
     if let Some(match_dir) = args.match_dir.as_ref() {
-        match_dir_against_db(match_dir, &args.filter_paths, &conn);
+        match_dir_against_db(match_dir, &args, &database);
     } else {
-        match_dir_against_db(".", &args.filter_paths, &conn);
+        match_dir_against_db(".", &args, &database);
     }
 
     Ok(())
 }
-
-/*
-"
-*/
 
 /*
 let mut output = String::with_capacity(10 * 1024 * 1024);
@@ -476,44 +663,3 @@ static HTML_HEADER: &str =
 
 ";
  */
-
-/*
-let mut data = Vec::new();
-let mut file = std::fs::File::open(input_path).unwrap();
-file.read_to_end(&mut data).unwrap();
-
-if data.len() >= 7 {
-    let len = data.len() - 7;
-
-    for i in 0..len {
-        let range = &data[i..i + 7];
-
-        /*
-        if range[0] == b'<'
-            && range[1] == b'S'
-            && range[2] == b'C'
-            && range[3] == b'R'
-            && range[4] == b'I'
-            && range[5] == b'P'
-            && range[6] == b'T'
-        {
-            println!("{}", &input_path[18..]);
-            break;
-        Write}
-        */
-
-        if range[0] == b'<'
-            && range[1] == b's'
-            && range[2] == b'c'
-            && range[3] == b'r'
-            && range[4] == b'i'
-            && range[5] == b'p'
-            && range[6] == b't'
-        {
-            println!("{}", &input_path[18..]);
-            break;
-        }
-
-    }
-}
-*/

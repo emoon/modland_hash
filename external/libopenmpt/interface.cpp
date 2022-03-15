@@ -20,8 +20,8 @@ static uint64_t hash_patterns(openmpt::module &mod)
     // Hash pattern data using 64-bit FNV-1a
     uint64_t hash = 14695981039346656037ull;
 
-    const auto num_channels = mod.get_num_channels();
-    const auto num_songs = mod.get_num_subsongs();
+    const int32_t num_channels = mod.get_num_channels();
+    const int32_t num_songs = mod.get_num_subsongs();
     for (auto s = 0; s < num_songs; s++)
     {
         mod.select_subsong(s);
@@ -35,8 +35,8 @@ static uint64_t hash_patterns(openmpt::module &mod)
         // Go through the complete sequence order by order.
         for (auto o = 0; o < num_orders; o++)
         {
-            const auto p = mod.get_order_pattern(o);
-            const auto num_rows = mod.get_pattern_num_rows(p);
+            const int32_t p = mod.get_order_pattern(o);
+            const int32_t num_rows = mod.get_pattern_num_rows(p);
             for (auto c = 0; c < num_channels; c++)
             {
                 for (auto r = 0; r < num_rows; r++)
@@ -66,29 +66,17 @@ extern "C"
         int channel_count;
     };
 
-    CData *hash_file(const char *filename)
+    CData *hash_file(unsigned char *buffer, int len)
     {
         // uint64_t hash = 0;
         CData *data = nullptr;
 
         try
         {
-            std::stringstream file;
-            {
-                std::ifstream is(filename, std::ios::binary);
-                if (!is.good())
-                {
-                    // std::cout << "Cannot open " << filename << " for reading" << std::endl;
-                    return 0;
-                }
-
-                file << is.rdbuf();
-            }
-
             openmpt::detail::initial_ctls_map ctls;
             ctls["load.skip_samples"] = "1";
             ctls["load.skip_plugins"] = "1";
-            openmpt::module mod(file, std::clog, ctls);
+            openmpt::module mod(buffer, (size_t)len, std::clog, ctls);
 
             std::string extension = mod.get_metadata("type");
             std::string artist = mod.get_metadata("artist");
@@ -133,7 +121,7 @@ extern "C"
             }
             */
 
-            std::string comments = mod.get_metadata("message_raw");
+            // std::string comments = mod.get_metadata("message_raw");
 
             // auto pattern_hash = hash_patterns(mod);
             // hash = hash_patterns(mod);
@@ -141,8 +129,8 @@ extern "C"
             data = new CData;
             data->hash = hash_patterns(mod);
             data->sample_names = strdup(instruments.c_str());
-            data->artist = strdup(artist.c_str());
-            data->comments = strdup(comments.c_str());
+            data->artist = 0;   // strdup(artist.c_str());
+            data->comments = 0; // strdup(comments.c_str());
             data->channel_count = mod.get_num_channels();
         }
         catch (const std::exception &e)
@@ -156,8 +144,8 @@ extern "C"
     void free_hash_data(CData *data)
     {
         free(data->sample_names);
-        free(data->artist);
-        free(data->comments);
+        // free(data->artist);
+        // free(data->comments);
         delete data;
     }
 }
