@@ -25,13 +25,21 @@ static DB_SIZE: usize = 700_0000;
 use walkdir::WalkDir;
 
 // Get files for a given directory
-fn get_files(path: &str) -> Vec<String> {
+fn get_files(path: &str, recurse: bool) -> Vec<String> {
     if !Path::new(path).exists() {
         println!(
-            "Path \"{}\" doesn't exist. No files will be processed.",
+            "Path/File \"{}\" doesn't exist. No file(s) will be processed.",
             path
         );
         return Vec::new();
+    }
+
+    // Check if "path" is a single file
+
+    let md = std::fs::metadata(path).unwrap();
+
+    if md.is_file() {
+        return vec![path.to_owned()];
     }
 
     let spinner_style = ProgressStyle::with_template("{prefix:.bold.dim} {spinner} {wide_msg}")
@@ -42,7 +50,10 @@ fn get_files(path: &str) -> Vec<String> {
     pb.set_style(spinner_style);
     pb.set_prefix(format!("Fetching list of files... [{}/?]", 0));
 
+    let max_depth = if !recurse { 1 } else { usize::MAX };
+
     let files: Vec<String> = WalkDir::new(path)
+        .max_depth(max_depth)
         .into_iter()
         .filter_map(|e| {
             let file = e.unwrap();
@@ -123,7 +134,7 @@ impl Database {
     }
 }
 
-/// Simple program to greet a person
+/// Modland hashing
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 struct Args {
@@ -135,17 +146,38 @@ struct Args {
     #[clap(short, long)]
     download_database: bool,
 
-    /// Directory to match against the database. If not specificed the current directory will be used
+    /// Directory to search against the database. If not specificed the current directory will be used.
     #[clap(short, long)]
     match_dir: Option<String>,
+
+    /// When searching in the database only include paths in the current list "For example" --list_duplicateds_in_database --match_db_dir "/incoming" will only show duplicates for files in the incoming directory.
+    #[clap(long)]
+    match_database_dir: Option<String>,
+
+    /// Do recurseive scanning (include sub-directories) when using --match-dir and --build-database
+    #[clap(short, long)]
+    recursive: bool,
+
+    /// When searching in the database skip files ending with these extensions. Example: --skip-file-extensions "mdx,pdx" will skip all dupes containing .mdx and .pdx files (ignores case)
+    #[clap(short, long)]
+    skip_file_extensions: Option<String>,
 
     /// Makes it possible to print sample names if pattern hash mismatches
     #[clap(short, long)]
     print_samples_pattern_hash: bool,
 
+    /// List existing duplicates in the database
+    #[clap(short, long)]
+    list_duplicateds_in_database: bool,
+
     /// Makes it possible to remove paths in the db with the matching results. For example --filter_paths "/incoming" will remove any matching against the "incoming" directory. To filter more than one path use "/path1,/path2"
     #[clap(short, long, default_value = "")]
     filter_paths: String,
+}
+
+fn get_url(filename: &str) -> String {
+    let url = filename.replace(" ", "%20");
+    format!("https://ftp.modland.com{}", url)
 }
 
 // Fetches info for a track/song
@@ -206,8 +238,8 @@ fn get_db_filename() -> String {
 }
 
 // Updates the database with new entries
-fn build_database(out_filename: &str, database_path: &str) {
-    let files = get_files(database_path);
+fn build_database(out_filename: &str, database_path: &str, args: &Args) {
+    let files = get_files(database_path, args.recursive);
 
     let spinner_style =
         ProgressStyle::with_template("{prefix:.bold.dim} {wide_bar} {pos}/{len}").unwrap();
@@ -454,9 +486,13 @@ fn print_samples(samples: &str) {
 
 fn print_samples_with_outline(samples: &str) {
     // figure out the max len of the lines
+    let mut last_line_with_text = 0;
     let mut max_len = 0;
-    for line in samples.lines() {
+    for (index, line) in samples.lines().enumerate() {
         max_len = std::cmp::max(line.len(), max_len);
+        if !line.is_empty() {
+            last_line_with_text = index;
+        }
     }
 
     // spacing on each side
@@ -470,7 +506,7 @@ fn print_samples_with_outline(samples: &str) {
 
     println!("┐");
 
-    for line in samples.lines() {
+    for (index, line) in samples.lines().enumerate() {
         print!("│ ");
         print!("{}", line);
 
@@ -479,6 +515,10 @@ fn print_samples_with_outline(samples: &str) {
         }
 
         println!("│");
+
+        if index == last_line_with_text {
+            break;
+        }
     }
 
     print!("└");
@@ -490,7 +530,7 @@ fn print_samples_with_outline(samples: &str) {
 }
 
 fn match_dir_against_db(dir: &str, args: &Args, lookup: &Database) {
-    let files = get_files(dir);
+    let files = get_files(dir, args.recursive);
 
     //files.par_iter().for_each(|filename| {
     files.iter().for_each(|filename| {
@@ -522,8 +562,7 @@ fn match_dir_against_db(dir: &str, args: &Args, lookup: &Database) {
         let mut printed_initial_samples = false;
 
         for found in &found_entries {
-            let url = found.0.filename.replace(" ", "%20");
-            let url = format!("https://ftp.modland.com{}", url);
+            let url = get_url(&found.0.filename);
             if found.1 .0 && found.1 .1 {
                 println!("Found match {} (hash) (pattern_hash)", url);
             } else if found.1 .0 && !found.1 .1 {
@@ -561,6 +600,67 @@ fn check_for_db_file() -> Option<PathBuf> {
     None
 }
 
+fn should_include_path(metadata: &[DatabaseMeta], indices: &[usize], filters: &str) -> bool {
+    if filters == "" {
+        return true;
+    }
+
+    let filter_paths = filters.split(',');
+
+    for t in filter_paths {
+        for i in indices {
+            let m = &metadata[*i];
+
+            if m.filename.starts_with(t) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+fn print_db_duplicates(db: &Database, args: &Args) {
+    let mut hash_dupes = Vec::with_capacity(700_0000);
+    let metadata = &db.metadata;
+    let default_str = String::new();
+
+    let math_db_dir = args.match_database_dir.as_ref().unwrap_or(&default_str);
+
+    for (_key, val) in db.sha_hash.iter() {
+        if val.len() <= 1 {
+            continue;
+        }
+
+        if !should_include_path(metadata, &val, &math_db_dir) {
+            continue;
+        }
+
+        let mut vals = Vec::with_capacity(val.len());
+
+        for v in val {
+            vals.push(&metadata[*v]);
+        }
+
+        // sort the individual entries
+        vals.sort_by(|a, b| a.filename.cmp(&b.filename));
+
+        hash_dupes.push(vals);
+    }
+
+    // sort the whole array to have deterministic output
+    hash_dupes.sort_by(|a, b| a[0].filename.cmp(&b[0].filename));
+
+    for (index, v) in hash_dupes.iter().enumerate() {
+        println!("\n==================================================================");
+        println!("Dupe Entry {}", index);
+
+        for e in v {
+            println!("{}", get_url(&e.filename));
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     SimpleLogger::new()
@@ -577,7 +677,7 @@ fn main() -> Result<()> {
             std::fs::remove_file(&filename).unwrap();
         }
 
-        build_database(&filename, db_path);
+        build_database(&filename, db_path, &args);
 
         return Ok(());
     }
@@ -600,6 +700,12 @@ fn main() -> Result<()> {
     let database = load_database(&get_db_filename()).unwrap();
 
     println!("Loading database... [Done]\n");
+
+    // Process duplicates in the database
+    if args.list_duplicateds_in_database {
+        print_db_duplicates(&database, &args);
+        return Ok(());
+    }
 
     if let Some(match_dir) = args.match_dir.as_ref() {
         match_dir_against_db(match_dir, &args, &database);
