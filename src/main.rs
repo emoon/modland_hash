@@ -3,10 +3,10 @@ use clap::Parser;
 use flate2::{read::ZlibDecoder, write::ZlibEncoder, Compression};
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
-use simple_logger::SimpleLogger;
-//use regex::Regex;
 use sha2::Digest;
+use simple_logger::SimpleLogger;
 use std::{
     collections::HashMap,
     fs::File,
@@ -16,60 +16,12 @@ use std::{
     path::{Path, PathBuf},
     sync::Mutex,
 };
+use walkdir::WalkDir;
 
 static DB_FILENAME: &str = "modland_hash.db";
 static DB_REMOTE: &str = "https://www.dropbox.com/s/o5z6ffnyl7zzoo0/modland_hash.db?dl=1";
-static DB_VERSION: u32 = (0 << 16) | (0 << 8) | 1; // Version of database that has to match. (0.0.1)
+static DB_VERSION: u32 = 0x0000_00_01; // Version of database that has to match. (0.0.1)
 static DB_SIZE: usize = 700_0000;
-
-use walkdir::WalkDir;
-
-// Get files for a given directory
-fn get_files(path: &str, recurse: bool) -> Vec<String> {
-    if !Path::new(path).exists() {
-        println!(
-            "Path/File \"{}\" doesn't exist. No file(s) will be processed.",
-            path
-        );
-        return Vec::new();
-    }
-
-    // Check if "path" is a single file
-
-    let md = std::fs::metadata(path).unwrap();
-
-    if md.is_file() {
-        return vec![path.to_owned()];
-    }
-
-    let spinner_style = ProgressStyle::with_template("{prefix:.bold.dim} {spinner} {wide_msg}")
-        .unwrap()
-        .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈ ");
-
-    let pb = ProgressBar::new(0);
-    pb.set_style(spinner_style);
-    pb.set_prefix(format!("Fetching list of files... [{}/?]", 0));
-
-    let max_depth = if !recurse { 1 } else { usize::MAX };
-
-    let files: Vec<String> = WalkDir::new(path)
-        .max_depth(max_depth)
-        .into_iter()
-        .filter_map(|e| {
-            let file = e.unwrap();
-            let metadata = file.metadata().unwrap();
-
-            if let Some(filename) = file.path().to_str() {
-                if metadata.is_file() && !filename.ends_with(".listing") {
-                    pb.set_message(filename.to_owned());
-                    return Some(filename.to_owned());
-                }
-            }
-            None
-        })
-        .collect();
-    files
-}
 
 #[repr(C)]
 struct CData {
@@ -147,20 +99,32 @@ struct Args {
     download_database: bool,
 
     /// Directory to search against the database. If not specificed the current directory will be used.
-    #[clap(short, long)]
-    match_dir: Option<String>,
-
-    /// When searching in the database only include paths in the current list "For example" --list_duplicateds_in_database --match_db_dir "/incoming" will only show duplicates for files in the incoming directory.
-    #[clap(long)]
-    match_database_dir: Option<String>,
+    #[clap(short, long, default_value = ".")]
+    match_dir: String,
 
     /// Do recurseive scanning (include sub-directories) when using --match-dir and --build-database
     #[clap(short, long)]
     recursive: bool,
 
-    /// When searching in the database skip files ending with these extensions. Example: --skip-file-extensions "mdx,pdx" will skip all dupes containing .mdx and .pdx files (ignores case)
-    #[clap(short, long)]
-    skip_file_extensions: Option<String>,
+    /// If any duplicates includes these file extensions, they will be skipped. Example: --skip-file-extensions "mdx,pdx" will skip all dupes containing .mdx and .pdx files (ignores case)
+    #[clap(long, default_value = "")]
+    exclude_file_extensions: String,
+
+    /// If any duplicate match these paths, they will be skipped. Example: --exclude-paths "/pub/favourites" will only show show results where "/pub/favourites" isn't present.
+    #[clap(long, default_value = "")]
+    exclude_paths: String,
+
+    /// Only include If any duplicates includes these file extensions, other files will be skipped. Example: --include-file-extensions "mod,xm" will only show matches for .mod and .xm files
+    #[clap(short, long, default_value = "")]
+    include_file_extensions: String,
+
+    /// Only include match if any duplicates maches these/this file path(s). Example: --include-paths "/incoming" will only show results when at least one file matches "/incoming"
+    #[clap(long, default_value = "")]
+    include_paths: String,
+
+    /// Only include match if one of the duplicates matches the regexp pattern. Example: --include_sample_name ".*ripped.*" will only show duplicates where one of the tracks includes sample name(s) include "ripped"
+    #[clap(long, default_value = "")]
+    include_sample_name: String,
 
     /// Makes it possible to print sample names if pattern hash mismatches
     #[clap(short, long)]
@@ -170,9 +134,156 @@ struct Args {
     #[clap(short, long)]
     list_duplicateds_in_database: bool,
 
-    /// Makes it possible to remove paths in the db with the matching results. For example --filter_paths "/incoming" will remove any matching against the "incoming" directory. To filter more than one path use "/path1,/path2"
-    #[clap(short, long, default_value = "")]
-    filter_paths: String,
+    /// Searches the whole database for a sample name with a regexp. The result will include all matching files, not just duplicates. --Example: --search-db--sample-name ".*BBS.*" matches all files that includes "BBS" in one of the samples (case-insensitive)
+    #[clap(long, default_value = "")]
+    search_db_sample_name: String,
+}
+
+struct Filters {
+    include_paths: Vec<String>,
+    include_file_extensions: Vec<String>,
+    exclude_paths: Vec<String>,
+    exclude_file_extensions: Vec<String>,
+    sample_search: Option<Regex>,
+}
+
+impl Filters {
+    fn init_filter(filter: &str, prefix: &str) -> Vec<String> {
+        if filter.is_empty() {
+            return Vec::new();
+        }
+
+        let mut output = Vec::new();
+
+        for t in filter.split(",") {
+            output.push(format!("{}{}", prefix, t));
+        }
+
+        output
+    }
+
+    fn new(args: &Args) -> Filters {
+        let sample_search = if !args.include_sample_name.is_empty() {
+            Some(Regex::new(&args.include_sample_name).unwrap())
+        } else {
+            None
+        };
+
+        Filters {
+            include_paths: Self::init_filter(&args.include_paths, ""),
+            include_file_extensions: Self::init_filter(&args.include_file_extensions, "."),
+            exclude_paths: Self::init_filter(&args.exclude_paths, ""),
+            exclude_file_extensions: Self::init_filter(&args.exclude_file_extensions, "."),
+            sample_search,
+        }
+    }
+
+    fn starts_with(filename: &str, tests: &[String], default_val: bool) -> bool {
+        if tests.is_empty() {
+            default_val
+        } else {
+            tests.iter().any(|t| filename.starts_with(t))
+        }
+    }
+
+    fn ends_with(filename: &str, tests: &[String], default_val: bool) -> bool {
+        if tests.is_empty() {
+            default_val
+        } else {
+            tests.iter().any(|t| filename.ends_with(t))
+        }
+    }
+
+    // Apply all the filters
+    fn apply_filter<'a>(
+        &self,
+        input: &[&'a DatabaseMeta],
+        skip_level: usize,
+    ) -> Vec<&'a DatabaseMeta> {
+        let mut output = Vec::new();
+
+        for i in input {
+            let filename = &i.filename;
+
+            if !Self::starts_with(filename, &self.exclude_paths, false)
+                && !Self::ends_with(filename, &self.exclude_file_extensions, false)
+            {
+                if Self::starts_with(filename, &self.include_paths, true)
+                    && Self::ends_with(filename, &self.include_file_extensions, true)
+                {
+                    output.push(*i);
+                }
+            }
+        }
+
+        if let Some(re) = self.sample_search.as_ref() {
+            for file in &output {
+                if !file.samples.is_empty() {
+                    if re.is_match(&file.samples.to_ascii_lowercase()) {
+                        if output.len() >= skip_level {
+                            return output;
+                        } else {
+                            return Vec::new();
+                        }
+                    }
+                }
+            }
+
+            return Vec::new();
+        }
+
+        if output.len() >= skip_level {
+            output
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+// Get files for a given directory
+fn get_files(path: &str, recurse: bool) -> Vec<String> {
+    if !Path::new(path).exists() {
+        println!(
+            "Path/File \"{}\" doesn't exist. No file(s) will be processed.",
+            path
+        );
+        return Vec::new();
+    }
+
+    // Check if "path" is a single file
+    let md = std::fs::metadata(path).unwrap();
+
+    if md.is_file() {
+        return vec![path.to_owned()];
+    }
+
+    let spinner_style = ProgressStyle::with_template("{prefix:.bold.dim} {spinner} {wide_msg}")
+        .unwrap()
+        .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈ ");
+
+    let pb = ProgressBar::new(0);
+    pb.set_style(spinner_style);
+    pb.set_prefix(format!("Fetching list of files... [{}/?]", 0));
+
+    let max_depth = if !recurse { 1 } else { usize::MAX };
+
+    let files: Vec<String> = WalkDir::new(path)
+        .max_depth(max_depth)
+        .into_iter()
+        .filter_map(|e| {
+            let file = e.unwrap();
+            let metadata = file.metadata().unwrap();
+
+            if let Some(filename) = file.path().to_str() {
+                if metadata.is_file() && !filename.ends_with(".listing") {
+                    pb.set_message(filename.to_owned());
+                    return Some(filename.to_owned());
+                }
+            }
+            None
+        })
+        .collect();
+    files
 }
 
 fn get_url(filename: &str) -> String {
@@ -478,12 +589,6 @@ fn filter_names<'a>(names: &[&'a DatabaseMeta], dir_filters: &str) -> Vec<&'a Da
     output
 }
 
-/*
-fn print_samples(samples: &str) {
-    println!("{}", samples);
-}
-*/
-
 fn print_samples_with_outline(samples: &str) {
     // figure out the max len of the lines
     let mut last_line_with_text = 0;
@@ -532,6 +637,8 @@ fn print_samples_with_outline(samples: &str) {
 fn match_dir_against_db(dir: &str, args: &Args, lookup: &Database) {
     let files = get_files(dir, args.recursive);
 
+    let filters = Filters::new(args);
+
     //files.par_iter().for_each(|filename| {
     files.iter().for_each(|filename| {
         let info = get_track_info(filename);
@@ -542,8 +649,8 @@ fn match_dir_against_db(dir: &str, args: &Args, lookup: &Database) {
         let filenames = get_files_from_sha_hash(&info, lookup);
         let filenames_pattern = get_files_from_pattern_hash(&info, lookup);
 
-        let filenames = filter_names(&filenames, &args.filter_paths);
-        let filenames_pattern = filter_names(&filenames_pattern, &args.filter_paths);
+        let filenames = filters.apply_filter(&filenames, 1);
+        let filenames_pattern = filters.apply_filter(&filenames_pattern, 1);
 
         let mut found_entries = HashMap::new();
 
@@ -600,39 +707,13 @@ fn check_for_db_file() -> Option<PathBuf> {
     None
 }
 
-fn should_include_path(metadata: &[DatabaseMeta], indices: &[usize], filters: &str) -> bool {
-    if filters == "" {
-        return true;
-    }
-
-    let filter_paths = filters.split(',');
-
-    for t in filter_paths {
-        for i in indices {
-            let m = &metadata[*i];
-
-            if m.filename.starts_with(t) {
-                return true;
-            }
-        }
-    }
-
-    false
-}
-
 fn print_db_duplicates(db: &Database, args: &Args) {
     let mut hash_dupes = Vec::with_capacity(700_0000);
     let metadata = &db.metadata;
-    let default_str = String::new();
-
-    let math_db_dir = args.match_database_dir.as_ref().unwrap_or(&default_str);
+    let filters = Filters::new(args);
 
     for (_key, val) in db.sha_hash.iter() {
         if val.len() <= 1 {
-            continue;
-        }
-
-        if !should_include_path(metadata, &val, &math_db_dir) {
             continue;
         }
 
@@ -642,10 +723,17 @@ fn print_db_duplicates(db: &Database, args: &Args) {
             vals.push(&metadata[*v]);
         }
 
-        // sort the individual entries
-        vals.sort_by(|a, b| a.filename.cmp(&b.filename));
+        let mut vals = filters.apply_filter(&vals, 2);
 
-        hash_dupes.push(vals);
+        if !vals.is_empty() {
+            // sort the individual entries
+            vals.sort_by(|a, b| a.filename.cmp(&b.filename));
+            hash_dupes.push(vals);
+        }
+    }
+
+    if hash_dupes.is_empty() {
+        return;
     }
 
     // sort the whole array to have deterministic output
@@ -657,6 +745,10 @@ fn print_db_duplicates(db: &Database, args: &Args) {
 
         for e in v {
             println!("{}", get_url(&e.filename));
+
+            if filters.sample_search.is_some() {
+                print_samples_with_outline(&e.samples);
+            }
         }
     }
 }
@@ -707,11 +799,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    if let Some(match_dir) = args.match_dir.as_ref() {
-        match_dir_against_db(match_dir, &args, &database);
-    } else {
-        match_dir_against_db(".", &args, &database);
-    }
+    match_dir_against_db(&args.match_dir, &args, &database);
 
     Ok(())
 }
