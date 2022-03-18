@@ -54,7 +54,7 @@ static uint64_t hash_patterns(openmpt::module &mod, int dump_patterns)
                     if (dump_patterns)
                     {
                         std::string t = mod.format_pattern_row_channel_command(p, r, c, openmpt::module::command_note);
-                        printf("%s ", t.c_str(), note);
+                        printf("%s ", t.c_str());
                     }
                 }
                 if (dump_patterns)
