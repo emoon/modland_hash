@@ -569,31 +569,6 @@ fn get_files_from_pattern_hash<'a>(
     entries
 }
 
-fn filter_names<'a>(names: &[&'a DatabaseMeta], dir_filters: &str) -> Vec<&'a DatabaseMeta> {
-    let mut output = Vec::new();
-
-    if dir_filters.is_empty() {
-        for f in names {
-            output.push(*f);
-        }
-
-        return output;
-    }
-
-    let filter_paths = dir_filters.split(',');
-
-    for t in filter_paths {
-        for meta in names {
-            if !meta.filename.starts_with(t) {
-                output.push(*meta);
-                break;
-            }
-        }
-    }
-
-    output
-}
-
 fn print_samples_with_outline(samples: &str) {
     // figure out the max len of the lines
     let mut last_line_with_text = 0;
