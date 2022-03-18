@@ -37,7 +37,7 @@ fn main() {
     if env.contains("windows") {
         build.flag("/std:c++latest");
     } else if env.contains("darwin") {
-        build.flag("-std=c++17"); 
+        build.flag("-std=c++17");
     } else {
         build.flag("-std=c++17");
         build.cpp_link_stdlib("stdc++");
