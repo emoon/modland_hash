@@ -33,7 +33,7 @@ struct CData {
 }
 
 extern "C" {
-    fn hash_file(data: *const u8, len: u32) -> *const CData;
+    fn hash_file(data: *const u8, len: u32, dump_patterns: i32) -> *const CData;
     fn free_hash_data(data: *const CData);
 }
 
@@ -133,6 +133,10 @@ struct Args {
     /// List existing duplicates in the database
     #[clap(short, long)]
     list_duplicateds_in_database: bool,
+
+    /// Mostly a debug option to allow dumping pattern data when both building database and matching entries
+    #[clap(long)]
+    dump_patterns: bool,
 
     /// Searches the whole database for a sample name with a regexp. The result will include all matching files, not just duplicates. --Example: --search-db--sample-name ".*BBS.*" matches all files that includes "BBS" in one of the samples (case-insensitive)
     #[clap(long, default_value = "")]
@@ -292,14 +296,15 @@ fn get_url(filename: &str) -> String {
 }
 
 // Fetches info for a track/song
-fn get_track_info(filename: &str) -> TrackInfo {
+fn get_track_info(filename: &str, dump_patterns: bool) -> TrackInfo {
     // Calculate sha256 of the file
     let mut file = File::open(&filename).unwrap();
     let mut file_data = Vec::new();
     file.read_to_end(&mut file_data).unwrap();
     let hash = sha2::Sha256::digest(&file_data);
+    let dump_patterns = if dump_patterns { 1 } else { 0 };
 
-    let song_data = unsafe { hash_file(file_data.as_ptr(), file_data.len() as _) };
+    let song_data = unsafe { hash_file(file_data.as_ptr(), file_data.len() as _, dump_patterns) };
 
     let mut track_info = TrackInfo {
         filename: filename.to_owned(),
@@ -363,7 +368,7 @@ fn build_database(out_filename: &str, database_path: &str, args: &Args) {
     pb.set_prefix("Hashing files");
 
     files.par_iter().for_each(|input_path| {
-        let mut track = get_track_info(input_path);
+        let mut track = get_track_info(input_path, args.dump_patterns);
         track.filename = input_path.replace(database_path, "");
 
         {
@@ -641,7 +646,7 @@ fn match_dir_against_db(dir: &str, args: &Args, lookup: &Database) {
 
     //files.par_iter().for_each(|filename| {
     files.iter().for_each(|filename| {
-        let info = get_track_info(filename);
+        let info = get_track_info(filename, args.dump_patterns);
         let mut output = String::new();
 
         println!("Matching {}", filename);

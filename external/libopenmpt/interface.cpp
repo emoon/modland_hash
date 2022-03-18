@@ -15,7 +15,7 @@
 #include <cstring>
 #include <libopenmpt/libopenmpt.hpp>
 
-static uint64_t hash_patterns(openmpt::module &mod)
+static uint64_t hash_patterns(openmpt::module &mod, int dump_patterns)
 {
     // Hash pattern data using 64-bit FNV-1a
     uint64_t hash = 14695981039346656037ull;
@@ -37,9 +37,12 @@ static uint64_t hash_patterns(openmpt::module &mod)
         {
             const int32_t p = mod.get_order_pattern(o);
             const int32_t num_rows = mod.get_pattern_num_rows(p);
-            for (auto c = 0; c < num_channels; c++)
+            if (dump_patterns)
+                printf("=======================================================\n");
+
+            for (auto r = 0; r < num_rows; r++)
             {
-                for (auto r = 0; r < num_rows; r++)
+                for (auto c = 0; c < num_channels; c++)
                 {
                     const uint8_t note = mod.get_pattern_row_channel_command(p, r, c, openmpt::module::command_note);
                     if (note != 0)
@@ -47,10 +50,22 @@ static uint64_t hash_patterns(openmpt::module &mod)
                         hash ^= note;
                         hash *= 1099511628211ull;
                     }
+
+                    if (dump_patterns)
+                    {
+                        std::string t = mod.format_pattern_row_channel_command(p, r, c, openmpt::module::command_note);
+                        printf("%s ", t.c_str(), note);
+                    }
                 }
+                if (dump_patterns)
+                    printf("\n");
             }
+
+            if (dump_patterns)
+                fflush(stdout);
         }
     }
+
     return hash;
 }
 
@@ -66,7 +81,7 @@ extern "C"
         int channel_count;
     };
 
-    CData *hash_file(unsigned char *buffer, int len)
+    CData *hash_file(unsigned char *buffer, int len, int dump_patterns)
     {
         // uint64_t hash = 0;
         CData *data = nullptr;
@@ -127,7 +142,7 @@ extern "C"
             // hash = hash_patterns(mod);
 
             data = new CData;
-            data->hash = hash_patterns(mod);
+            data->hash = hash_patterns(mod, dump_patterns);
             data->sample_names = strdup(instruments.c_str());
             data->artist = 0;   // strdup(artist.c_str());
             data->comments = 0; // strdup(comments.c_str());
