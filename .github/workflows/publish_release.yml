@@ -1,0 +1,28 @@
+name: Publish
+
+on:
+  push:
+    tags:
+      - '*'
+
+jobs:
+  publish_windows:
+    name: Publish binaries
+    runs-on: windows-latest
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: Build code & Generate build
+      shell: cmd
+      run: |
+        git describe --tags --abbrev=0 > version.txt
+        set /P MODLAND_HASH_VERSION=< version.txt
+        cargo build --release && tar.exe -a -c -f modland_hash.zip targets\release\modland_hash.exe
+    - name: Upload binaries to release
+      uses: svenstaro/upload-release-action@v2
+      with:
+        repo_token: ${{ secrets.GITHUB_TOKEN }}
+        file: modland_hash.zip
+        asset_name: modland_hash_$tag.zip
+        tag: ${{ github.ref }}
+        overwrite: true
