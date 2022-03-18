@@ -17,7 +17,8 @@ jobs:
       run: |
         git describe --tags --abbrev=0 > version.txt
         set /P MODLAND_HASH_VERSION=< version.txt
-        cargo build --release && tar.exe -a -c -f modland_hash.zip target\release\modland_hash.exe
+        copy target\release\modland_hash.exe modland_hash.exe
+        cargo build --release && tar.exe -a -c -f modland_hash.zip modland_hash.exe
     - name: Upload binaries to release
       uses: svenstaro/upload-release-action@v2
       with:
