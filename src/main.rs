@@ -141,10 +141,6 @@ struct Args {
     /// Mostly a debug option to allow dumping pattern data when both building database and matching entries
     #[clap(long)]
     dump_patterns: bool,
-
-    /// Searches the whole database for a sample name with a regexp. The result will include all matching files, not just duplicates. --Example: --search-db--sample-name ".*BBS.*" matches all files that includes "BBS" in one of the samples (case-insensitive)
-    #[clap(long, default_value = "")]
-    search_db_sample_name: String,
 }
 
 struct Filters {
@@ -598,7 +594,7 @@ fn get_files_from_pattern_hash<'a>(
     entries
 }
 
-fn print_samples_with_outline(samples: &str) {
+fn print_samples_with_outline(samples: &str, match_reg: &Option<Regex>) {
     if samples.is_empty() {
         return;
     }
@@ -607,7 +603,7 @@ fn print_samples_with_outline(samples: &str) {
     let mut last_line_with_text = 0;
     let mut max_len = 0;
     for (index, line) in samples.lines().enumerate() {
-        max_len = std::cmp::max(line.len(), max_len);
+        max_len = std::cmp::max(line.chars().count(), max_len);
         if !line.is_empty() {
             last_line_with_text = index;
         }
@@ -628,11 +624,19 @@ fn print_samples_with_outline(samples: &str) {
         print!("│ ");
         print!("{}", line);
 
-        for _ in line.len()..max_len - 1 {
+        for _ in line.chars().count()..max_len - 1 {
             print!(" ");
         }
 
-        println!("│");
+        if let Some(re) = match_reg.as_ref() {
+            if re.is_match(&line.to_ascii_lowercase()) {
+                println!("│ << regex ({}) match!", re.as_str());
+            } else {
+                println!("│");
+            }
+        } else {
+            println!("│");
+        }
 
         if index == last_line_with_text {
             break;
@@ -651,6 +655,7 @@ fn print_found_entries(
     inital_samples: &str,
     entries: &HashMap<&DatabaseMeta, (bool, bool)>,
     args: &Args,
+    search_sample: &Option<Regex>,
 ) {
     let mut printed_initial_samples = false;
     let mut vals = Vec::with_capacity(entries.len());
@@ -669,11 +674,11 @@ fn print_found_entries(
             println!("Found match {} (hash)", url);
         } else if args.print_sample_names {
             if !printed_initial_samples && args.print_sample_names {
-                print_samples_with_outline(&inital_samples);
+                print_samples_with_outline(&inital_samples, search_sample);
                 printed_initial_samples = true;
             }
             println!("Found match {} (pattern_hash)", url);
-            print_samples_with_outline(&val.0.samples);
+            print_samples_with_outline(&val.0.samples, search_sample);
         } else {
             println!("Found match {} (pattern_hash)", url);
         }
@@ -714,7 +719,12 @@ fn match_dir_against_db(dir: &str, args: &Args, lookup: &Database) {
             }
         }
 
-        print_found_entries(&info.sample_names, &found_entries, args);
+        print_found_entries(
+            &info.sample_names,
+            &found_entries,
+            args,
+            &filters.sample_search,
+        );
 
         println!();
     });
@@ -788,7 +798,7 @@ fn print_db_duplicates(db: &Database, args: &Args) {
             println!("{}", get_url(&e.filename));
 
             if filters.sample_search.is_some() || args.print_sample_names {
-                print_samples_with_outline(&e.samples);
+                print_samples_with_outline(&e.samples, &filters.sample_search);
             }
         }
     }
@@ -804,7 +814,7 @@ fn print_db_duplicates(db: &Database, args: &Args) {
             println!("{}", get_url(&e.filename));
 
             if filters.sample_search.is_some() || args.print_sample_names {
-                print_samples_with_outline(&e.samples);
+                print_samples_with_outline(&e.samples, &filters.sample_search);
             }
         }
     }
