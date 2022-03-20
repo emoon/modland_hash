@@ -130,9 +130,9 @@ struct Args {
     #[clap(long, default_value = "")]
     search_filename: String,
 
-    /// Makes it possible to print sample names if pattern hash mismatches
+    /// Makes it possible to print sample names
     #[clap(short, long)]
-    print_samples_pattern_hash: bool,
+    print_sample_names: bool,
 
     /// List existing duplicates in the database
     #[clap(short, long)]
@@ -667,8 +667,8 @@ fn print_found_entries(
             println!("Found match {} (hash) (pattern_hash)", url);
         } else if val.1 .0 && !val.1 .1 {
             println!("Found match {} (hash)", url);
-        } else if args.print_samples_pattern_hash {
-            if !printed_initial_samples && args.print_samples_pattern_hash {
+        } else if args.print_sample_names {
+            if !printed_initial_samples && args.print_sample_names {
                 print_samples_with_outline(&inital_samples);
                 printed_initial_samples = true;
             }
@@ -787,7 +787,7 @@ fn print_db_duplicates(db: &Database, args: &Args) {
         for e in v {
             println!("{}", get_url(&e.filename));
 
-            if filters.sample_search.is_some() {
+            if filters.sample_search.is_some() || args.print_sample_names {
                 print_samples_with_outline(&e.samples);
             }
         }
@@ -803,7 +803,7 @@ fn print_db_duplicates(db: &Database, args: &Args) {
         for e in v {
             println!("{}", get_url(&e.filename));
 
-            if filters.sample_search.is_some() {
+            if filters.sample_search.is_some() || args.print_sample_names {
                 print_samples_with_outline(&e.samples);
             }
         }

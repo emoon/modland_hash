@@ -412,7 +412,7 @@ dependencies = [
 
 [[package]]
 name = "modland_hash"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "bincode",
