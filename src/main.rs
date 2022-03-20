@@ -126,6 +126,10 @@ struct Args {
     #[clap(long, default_value = "")]
     include_sample_name: String,
 
+    /// Only display duplicate results if one of the hits include the maching filename. Example --search-filename ".*north.*" will only include dupe resutls if one of the entries has .*north.* in it (case-insensitive)
+    #[clap(long, default_value = "")]
+    search_filename: String,
+
     /// Makes it possible to print sample names if pattern hash mismatches
     #[clap(short, long)]
     print_samples_pattern_hash: bool,
@@ -149,6 +153,7 @@ struct Filters {
     exclude_paths: Vec<String>,
     exclude_file_extensions: Vec<String>,
     sample_search: Option<Regex>,
+    search_filename: Option<Regex>,
 }
 
 impl Filters {
@@ -168,7 +173,13 @@ impl Filters {
 
     fn new(args: &Args) -> Filters {
         let sample_search = if !args.include_sample_name.is_empty() {
-            Some(Regex::new(&args.include_sample_name).unwrap())
+            Some(Regex::new(&args.include_sample_name.to_ascii_lowercase()).unwrap())
+        } else {
+            None
+        };
+
+        let search_filename = if !args.search_filename.is_empty() {
+            Some(Regex::new(&args.search_filename.to_ascii_lowercase()).unwrap())
         } else {
             None
         };
@@ -179,6 +190,7 @@ impl Filters {
             exclude_paths: Self::init_filter(&args.exclude_paths, ""),
             exclude_file_extensions: Self::init_filter(&args.exclude_file_extensions, "."),
             sample_search,
+            search_filename,
         }
     }
 
@@ -217,6 +229,23 @@ impl Filters {
                 {
                     output.push(*i);
                 }
+            }
+        }
+
+        if let Some(re) = self.search_filename.as_ref() {
+            let mut found_filename = false;
+
+            for file in &output {
+                if !file.samples.is_empty() {
+                    if re.is_match(&file.filename.to_ascii_lowercase()) {
+                        found_filename = true;
+                        break;
+                    }
+                }
+            }
+
+            if !found_filename {
+                return Vec::new();
             }
         }
 
@@ -570,6 +599,10 @@ fn get_files_from_pattern_hash<'a>(
 }
 
 fn print_samples_with_outline(samples: &str) {
+    if samples.is_empty() {
+        return;
+    }
+
     // figure out the max len of the lines
     let mut last_line_with_text = 0;
     let mut max_len = 0;
@@ -614,15 +647,50 @@ fn print_samples_with_outline(samples: &str) {
     println!("┘");
 }
 
+fn print_found_entries(
+    inital_samples: &str,
+    entries: &HashMap<&DatabaseMeta, (bool, bool)>,
+    args: &Args,
+) {
+    let mut printed_initial_samples = false;
+    let mut vals = Vec::with_capacity(entries.len());
+
+    for found in entries {
+        vals.push(found);
+    }
+
+    vals.sort_by(|a, b| a.0.filename.cmp(&b.0.filename));
+
+    for val in &vals {
+        let url = get_url(&val.0.filename);
+        if val.1 .0 && val.1 .1 {
+            println!("Found match {} (hash) (pattern_hash)", url);
+        } else if val.1 .0 && !val.1 .1 {
+            println!("Found match {} (hash)", url);
+        } else if args.print_samples_pattern_hash {
+            if !printed_initial_samples && args.print_samples_pattern_hash {
+                print_samples_with_outline(&inital_samples);
+                printed_initial_samples = true;
+            }
+            println!("Found match {} (pattern_hash)", url);
+            print_samples_with_outline(&val.0.samples);
+        } else {
+            println!("Found match {} (pattern_hash)", url);
+        }
+    }
+
+    if vals.is_empty() {
+        println!("No matches found!");
+    }
+}
+
 fn match_dir_against_db(dir: &str, args: &Args, lookup: &Database) {
     let files = get_files(dir, args.recursive);
-
     let filters = Filters::new(args);
 
     //files.par_iter().for_each(|filename| {
     files.iter().for_each(|filename| {
         let info = get_track_info(filename, args.dump_patterns);
-        let mut output = String::new();
 
         println!("Matching {}", filename);
 
@@ -646,33 +714,9 @@ fn match_dir_against_db(dir: &str, args: &Args, lookup: &Database) {
             }
         }
 
-        let mut printed_initial_samples = false;
-
-        for found in &found_entries {
-            let url = get_url(&found.0.filename);
-            if found.1 .0 && found.1 .1 {
-                println!("Found match {} (hash) (pattern_hash)", url);
-            } else if found.1 .0 && !found.1 .1 {
-                println!("Found match {} (hash)", url);
-            } else if args.print_samples_pattern_hash {
-                if !printed_initial_samples && args.print_samples_pattern_hash {
-                    print_samples_with_outline(&info.sample_names);
-                    printed_initial_samples = true;
-                }
-                println!("Found match {} (pattern_hash)", url);
-                print_samples_with_outline(&found.0.samples);
-            } else {
-                println!("Found match {} (pattern_hash)", url);
-            }
-        }
-
-        if found_entries.is_empty() {
-            println!("No matches found!");
-        }
+        print_found_entries(&info.sample_names, &found_entries, args);
 
         println!();
-
-        output.push_str(&format!("Matching {}", filename));
     });
 }
 
@@ -689,6 +733,7 @@ fn check_for_db_file() -> Option<PathBuf> {
 
 fn print_db_duplicates(db: &Database, args: &Args) {
     let mut hash_dupes = Vec::with_capacity(700_0000);
+    let mut pattern_dupes = Vec::with_capacity(700_0000);
     let metadata = &db.metadata;
     let filters = Filters::new(args);
 
@@ -712,8 +757,24 @@ fn print_db_duplicates(db: &Database, args: &Args) {
         }
     }
 
-    if hash_dupes.is_empty() {
-        return;
+    for (_key, val) in db.pattern_hash.iter() {
+        if val.len() <= 1 {
+            continue;
+        }
+
+        let mut vals = Vec::with_capacity(val.len());
+
+        for v in val {
+            vals.push(&metadata[*v]);
+        }
+
+        let mut vals = filters.apply_filter(&vals, 2);
+
+        if !vals.is_empty() {
+            // sort the individual entries
+            vals.sort_by(|a, b| a.filename.cmp(&b.filename));
+            pattern_dupes.push(vals);
+        }
     }
 
     // sort the whole array to have deterministic output
@@ -721,7 +782,23 @@ fn print_db_duplicates(db: &Database, args: &Args) {
 
     for (index, v) in hash_dupes.iter().enumerate() {
         println!("\n==================================================================");
-        println!("Dupe Entry {}", index);
+        println!("Dupe Entry {} (hash)", index);
+
+        for e in v {
+            println!("{}", get_url(&e.filename));
+
+            if filters.sample_search.is_some() {
+                print_samples_with_outline(&e.samples);
+            }
+        }
+    }
+
+    // sort the whole array to have deterministic output
+    pattern_dupes.sort_by(|a, b| a[0].filename.cmp(&b[0].filename));
+
+    for (index, v) in pattern_dupes.iter().enumerate() {
+        println!("\n==================================================================");
+        println!("Dupe Entry {} (pattern_hash)", index);
 
         for e in v {
             println!("{}", get_url(&e.filename));
