@@ -15,6 +15,7 @@ use std::{
     os::raw::c_char,
     path::{Path, PathBuf},
     sync::Mutex,
+    time,
 };
 use walkdir::WalkDir;
 
@@ -529,22 +530,40 @@ fn load_database(filename: &str) -> Result<Database> {
     let mut decompressed_data = Vec::new();
     let mut version: [u8; 4] = [0, 0, 0, 0];
 
-    log::trace!("Loading Database... {} [Reading]", filename);
+    let total_time = time::Instant::now();
+    let now = time::Instant::now();
 
     let mut file = std::fs::File::open(filename)?;
     file.read(&mut version)?;
-
-    // TODO: check version
     file.read_to_end(&mut data)?;
 
-    log::trace!("Loading Database... [Decompressing]");
+    println!(
+        "Loading Database... [Read file]    ({} ms)",
+        now.elapsed().as_millis(),
+    );
+
+    let now = time::Instant::now();
 
     let mut z = ZlibDecoder::new(&data[..]);
     z.read_to_end(&mut decompressed_data)?;
 
-    log::trace!("Loading Database... [Unencoding]");
+    println!(
+        "Loading Database... [Decompressed] ({} ms)",
+        now.elapsed().as_millis(),
+    );
 
+    let now = time::Instant::now();
     let datbase: Database = bincode::deserialize(&decompressed_data[..])?;
+
+    println!(
+        "Loading Database... [Decoded]      ({} ms)",
+        now.elapsed().as_millis(),
+    );
+
+    println!(
+        "Loading Database... [Done]         ({} ms)",
+        total_time.elapsed().as_millis(),
+    );
 
     Ok(datbase)
 }
@@ -857,8 +876,6 @@ fn main() -> Result<()> {
     println!("Loading database...");
 
     let database = load_database(&get_db_filename()).unwrap();
-
-    println!("Loading database... [Done]\n");
 
     // Process duplicates in the database
     if args.list_duplicateds_in_database {

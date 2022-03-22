@@ -1,6 +1,6 @@
 [package]
 name = "modland_hash"
-version = "0.2.5"
+version = "0.2.6"
 authors = ["Daniel Collin <daniel@collin.com>"]
 edition = "2018"
 Build = "build.rs"
@@ -26,3 +26,12 @@ indicatif = "0.17.0-rc.8"
 walkdir = "2"
 rayon = "1.5.1"
 sha2 = "0.9.2"
+
+[profile.dev.package.flate2]
+opt-level = 3
+
+[profile.dev.package.bincode]
+opt-level = 3
+
+[profile.dev.package.serde]
+opt-level = 3
