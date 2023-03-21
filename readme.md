@@ -76,4 +76,4 @@ To compile the code you need to have the [Rust](https://www.rust-lang.org) compi
 1. Download Rust from here https://rustup.rs and follow the instructions for your platform
 2. `git clone https://github.com/emoon/modland_hash`
 3. `cd modland_hash && cargo build --release`
-4. Use `modland_hash` by running `target/release/modland_hash` or `cargo run --release -- <command line ops here>
+4. Use `modland_hash` by running `target/release/modland_hash` or `cargo run --release -- <command line ops here>`
