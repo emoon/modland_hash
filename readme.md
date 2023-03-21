@@ -1,6 +1,6 @@
 ## About
 
-modland_hash is a tool for [ftp.modland.com](ftp://ftp.modland.com) It's used to find duplicates and includes various filtering options.
+modland_hash is a tool for [ftp.modland.com](https://ftp.modland.com) It's used to find duplicates and includes various filtering options.
 The most basic use case is to run the tool and it will match the local files against the modland database and see if the files already exists on modland.
 Commandline options are as following:
 ```
