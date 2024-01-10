@@ -138,6 +138,10 @@ struct Args {
     /// List existing duplicates in the database
     #[clap(short, long)]
     list_duplicateds_in_database: bool,
+    
+    /// Dumps all info in the database 
+    #[clap(long)]
+    list_database: bool,
 
     /// Mostly a debug option to allow dumping pattern data when both building database and matching entries
     #[clap(long)]
@@ -687,25 +691,28 @@ fn print_found_entries(
 
     for val in &vals {
         let url = get_url(&val.0.filename);
-        if val.1 .0 && val.1 .1 {
-            println!("Found match {} (hash) (pattern_hash)", url);
-        } else if val.1 .0 && !val.1 .1 {
-            println!("Found match {} (hash)", url);
-        } else if args.print_sample_names {
+        if args.print_sample_names {
             if !printed_initial_samples && args.print_sample_names {
                 print_samples_with_outline(&inital_samples, search_sample);
                 printed_initial_samples = true;
             }
             println!("Found match {} (pattern_hash)", url);
             print_samples_with_outline(&val.0.samples, search_sample);
+        } else if val.1 .0 && val.1 .1 {
+            println!("Found match {} (hash) (pattern_hash)", url);
+        } else if val.1 .0 && !val.1 .1 {
+            println!("Found match {} (hash)", url);
+        } else if args.print_sample_names {
         } else {
             println!("Found match {} (pattern_hash)", url);
         }
     }
 
+    /*
     if vals.is_empty() {
         println!("No matches found!");
     }
+    */
 }
 
 fn match_dir_against_db(dir: &str, args: &Args, lookup: &Database) {
@@ -716,7 +723,7 @@ fn match_dir_against_db(dir: &str, args: &Args, lookup: &Database) {
     files.iter().for_each(|filename| {
         let info = get_track_info(filename, args.dump_patterns);
 
-        println!("Matching {}", filename);
+        //println!("Matching {}", filename);
 
         let filenames = get_files_from_sha_hash(&info, lookup);
         let filenames_pattern = get_files_from_pattern_hash(&info, lookup);
@@ -745,7 +752,7 @@ fn match_dir_against_db(dir: &str, args: &Args, lookup: &Database) {
             &filters.sample_search,
         );
 
-        println!();
+        //println!();
     });
 }
 
@@ -839,6 +846,41 @@ fn print_db_duplicates(db: &Database, args: &Args) {
     }
 }
 
+fn print_db(db: &Database, args: &Args) {
+    let mut entries = Vec::with_capacity(700_0000);
+    let metadata = &db.metadata;
+    let filters = Filters::new(args);
+
+    for (_key, val) in db.sha_hash.iter() {
+        let mut vals = Vec::with_capacity(val.len());
+
+        for v in val {
+            vals.push(&metadata[*v]);
+        }
+
+        let mut vals = filters.apply_filter(&vals, 0);
+
+        if !vals.is_empty() {
+            // sort the individual entries
+            vals.sort_by(|a, b| a.filename.cmp(&b.filename));
+            entries.push(vals);
+        }
+    }
+
+    // sort the whole array to have deterministic output
+    entries.sort_by(|a, b| a[0].filename.cmp(&b[0].filename));
+
+    for (_index, v) in entries.iter().enumerate() {
+        for e in v {
+            println!("{}", get_url(&e.filename));
+
+            if filters.sample_search.is_some() || args.print_sample_names {
+                print_samples_with_outline(&e.samples, &filters.sample_search);
+            }
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     SimpleLogger::new()
@@ -880,6 +922,12 @@ fn main() -> Result<()> {
     // Process duplicates in the database
     if args.list_duplicateds_in_database {
         print_db_duplicates(&database, &args);
+        return Ok(());
+    }
+
+    // Process duplicates in the database
+    if args.list_database {
+        print_db(&database, &args);
         return Ok(());
     }
 
