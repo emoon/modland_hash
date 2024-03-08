@@ -10,10 +10,10 @@
 
 #pragma once
 
-#include "BuildSettings.h"
+#include "openmpt/all/BuildSettings.hpp"
 
-#include "../common/Endianness.h"
-#include "../common/mptIO.h"
+#include "openmpt/base/Endian.hpp"
+#include "mpt/io/io.hpp"
 
 #include "../common/FileReaderFwd.h"
 
@@ -36,9 +36,7 @@ struct PageHeader
 	uint8le  page_segments;
 };
 
-} // namespace Ogg
-MPT_BINARY_STRUCT(Ogg::PageHeader, 27)
-namespace Ogg {
+MPT_BINARY_STRUCT(PageHeader, 27)
 
 
 struct PageInfo
@@ -57,13 +55,13 @@ struct PageInfo
 
 
 // returns false on EOF
-bool AdvanceToPageMagic(FileReader &file);
+bool AdvanceToPageMagic(FileCursor &file);
 
-bool ReadPage(FileReader &file, PageInfo &pageInfo, std::vector<uint8> *pageData = nullptr);
-bool ReadPage(FileReader &file, PageInfo &pageInfo, std::vector<uint8> &pageData);
-bool ReadPage(FileReader &file);
+bool ReadPage(FileCursor &file, PageInfo &pageInfo, std::vector<uint8> *pageData = nullptr);
+bool ReadPage(FileCursor &file, PageInfo &pageInfo, std::vector<uint8> &pageData);
+bool ReadPage(FileCursor &file);
 
-bool ReadPageAndSkipJunk(FileReader &file, PageInfo &pageInfo, std::vector<uint8> &pageData);
+bool ReadPageAndSkipJunk(FileCursor &file, PageInfo &pageInfo, std::vector<uint8> &pageData);
 
 
 bool UpdatePageCRC(PageInfo &pageInfo, const std::vector<uint8> &pageData);

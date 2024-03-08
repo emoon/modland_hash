@@ -33,6 +33,7 @@ fn main() {
 
     build.include("external/libopenmpt");
     build.include("external/libopenmpt/common");
+    build.include("external/libopenmpt/src");
 
     if env.contains("windows") {
         build.flag("/std:c++latest");

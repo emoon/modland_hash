@@ -10,13 +10,14 @@
 
 #pragma once
 
-#include "BuildSettings.h"
-
-#include "../soundlib/ModSample.h"
-#include "../soundlib/SampleIO.h"
-
+#include "openmpt/all/BuildSettings.hpp"
+#include "openmpt/base/Endian.hpp"
+#include "Snd_defs.h"
 
 OPENMPT_NAMESPACE_BEGIN
+
+struct ModSample;
+class SampleIO;
 
 // S3M File Header
 struct S3MFileHeader
@@ -43,11 +44,14 @@ struct S3MFileHeader
 		trkBeRoTracker    = 0x6000,
 		trkCreamTracker   = 0x7000,
 
+		trkAkord          = 0x0208,
 		trkST3_00         = 0x1300,
 		trkST3_20         = 0x1320,
+		trkST3_01         = 0x1301,
 		trkIT2_07         = 0x3207,
 		trkIT2_14         = 0x3214,
 		trkBeRoTrackerOld = 0x4100,  // Used from 2004 to 2012
+		trkGraoumfTracker = 0x5447,
 		trkCamoto         = 0xCA00,
 	};
 
@@ -129,7 +133,10 @@ struct S3MSampleHeader
 	uint8le  pack;            // Packing algorithm, SamplePacking
 	uint8le  flags;           // Sample flags
 	uint32le c5speed;         // Middle-C frequency
-	char     reserved2[12];   // Reserved + Internal ST3 stuff
+	char     reserved2[4];    // Reserved
+	uint16le gusAddress;      // Sample address in GUS memory (used for fingerprinting)
+	uint16le sb512;           // SoundBlaster loop expansion stuff
+	uint32le lastUsedPos;     // More SoundBlaster stuff
 	char     name[28];        // Sample name
 	char     magic[4];        // "SCRS" magic bytes ("SCRI" for Adlib instruments)
 
@@ -139,9 +146,26 @@ struct S3MSampleHeader
 	SmpLength ConvertToS3M(const ModSample &mptSmp);
 	// Retrieve the internal sample format flags for this sample.
 	SampleIO GetSampleFormat(bool signedSamples) const;
+	// Calculate the sample position in file
+	uint32 GetSampleOffset() const;
 };
 
 MPT_BINARY_STRUCT(S3MSampleHeader, 80)
+
+
+// Pattern decoding flags
+enum S3MPattern
+{
+	s3mEndOfRow      = 0x00,
+	s3mChannelMask   = 0x1F,
+	s3mNotePresent   = 0x20,
+	s3mVolumePresent = 0x40,
+	s3mEffectPresent = 0x80,
+	s3mAnyPresent    = 0xE0,
+
+	s3mNoteOff  = 0xFE,
+	s3mNoteNone = 0xFF,
+};
 
 
 OPENMPT_NAMESPACE_END
