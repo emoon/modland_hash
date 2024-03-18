@@ -127,6 +127,8 @@
 
 /*! \defgroup libopenmpt_cpp libopenmpt C++ */
 
+namespace OpenMPT { class CSoundFile; }
+
 namespace openmpt {
 
 /*! \addtogroup libopenmpt_cpp
@@ -1181,6 +1183,9 @@ public:
 	  \since 0.5.0
 	*/
 	LIBOPENMPT_CXX_API_MEMBER void ctl_set_text( std::string_view ctl, std::string_view value );
+
+
+	LIBOPENMPT_CXX_API_MEMBER OpenMPT::CSoundFile* get_snd_file();
 
 	// remember to add new functions to both C and C++ interfaces and to increase OPENMPT_API_VERSION_MINOR
 

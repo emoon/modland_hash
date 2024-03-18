@@ -393,6 +393,10 @@ std::int32_t module::get_pattern_num_rows( std::int32_t pattern ) const {
 	return impl->get_pattern_num_rows( pattern );
 }
 
+OpenMPT::CSoundFile* module::get_snd_file() {
+    return impl->get_snd_file();
+}
+
 std::uint8_t module::get_pattern_row_channel_command( std::int32_t pattern, std::int32_t row, std::int32_t channel, int command ) const {
 	return impl->get_pattern_row_channel_command( pattern, row, channel, command );
 }

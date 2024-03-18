@@ -100,6 +100,8 @@ public:
 		unfiltered,
 		auto_filter,
 	};
+	
+	inline OpenMPT::CSoundFile* get_snd_file() { return m_sndFile.get(); }
 
 protected:
 	struct subsong_data {
