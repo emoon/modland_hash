@@ -763,7 +763,7 @@ bool CSoundFile::ReadMED(FileReader &file, ModLoadingFlags loadFlags)
 	const bool hardwareMixSamples = (version < 2) || (version >= 2 && !(songHeader.flags2 & MMDSong::FLAG2_MIX));
 
 	bool needInstruments = false;
-	bool anySynthInstrs = false;
+	//bool anySynthInstrs = false;
 #ifdef MPT_WITH_VST
 	PLUGINDEX numPlugins = 0;
 #endif  // MPT_WITH_VST
@@ -814,7 +814,7 @@ bool CSoundFile::ReadMED(FileReader &file, ModLoadingFlags loadFlags)
 		if(isSynth)
 		{
 			// TODO: Figure out synth instruments
-			anySynthInstrs = true;
+			//anySynthInstrs = true;
 			instr.AssignSample(0);
 		}
 
@@ -1467,8 +1467,8 @@ bool CSoundFile::ReadMED(FileReader &file, ModLoadingFlags loadFlags)
 		m_nInstruments = 0;
 	}
 
-	if(anySynthInstrs)
-		AddToLog(LogWarning, U_("Synthesized MED instruments are not supported."));
+	//if(anySynthInstrs)
+	//	AddToLog(LogWarning, U_("Synthesized MED instruments are not supported."));
 
 	const mpt::uchar *madeWithTracker = MPT_ULITERAL("");
 	switch(version)

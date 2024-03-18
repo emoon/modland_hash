@@ -874,7 +874,7 @@ bool CSoundFile::ReadXM(FileReader &file, ModLoadingFlags loadFlags)
 
 	if(unsupportedSamples)
 	{
-		AddToLog(LogWarning, U_("Some compressed samples could not be loaded because they use an unsupported codec."));
+		//AddToLog(LogWarning, U_("Some compressed samples could not be loaded because they use an unsupported codec."));
 	}
 
 	// Read song comments: "text"
