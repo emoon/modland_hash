@@ -1,12 +1,12 @@
 use anyhow::{bail, Result};
 use clap::Parser;
-use flate2::{read::ZlibDecoder, write::ZlibEncoder, Compression};
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{ProgressBar, ProgressStyle, ProgressState};
 use rayon::prelude::*;
 use regex::Regex;
-use serde::{Deserialize, Serialize};
 use sha2::Digest;
+use std::sync::mpsc::{self, Receiver, Sender};
 use simple_logger::SimpleLogger;
+use rusqlite::Connection;
 use std::{
     collections::HashMap,
     fs::File,
@@ -14,23 +14,86 @@ use std::{
     io::{Read, Write},
     os::raw::c_char,
     path::{Path, PathBuf},
-    sync::Mutex,
-    time,
 };
+
 use walkdir::WalkDir;
 
 static DB_FILENAME: &str = "modland_hash.db";
-static DB_REMOTE: &str = "https://www.dropbox.com/s/o5z6ffnyl7zzoo0/modland_hash.db?dl=1";
-static DB_VERSION: u32 = 0x0000_00_01; // Version of database that has to match. (0.0.1)
-static DB_SIZE: usize = 700_0000;
+static DB_REMOTE: &str = "https://www.dropbox.com/scl/fi/gtk2yri6iizlaeb6b0j0j/modland_hash.db.7z?rlkey=axcrqv54eg2c1yju6vf043ly1&dl=1";
+
+#[repr(C)]
+struct CSampleData {
+    data: *const u8,
+    sample_text: *const c_char,
+    // length in bytes
+    length_bytes: u32,
+    // length in bytes
+    length: u32,
+    // Id for the sample in the song 
+    sample_id: u32,
+	// Global volume (sample volume is multiplied by this), 0...64
+	global_vol: u16,
+	// bits per sample
+    bits_per_sample: u8,
+    // if stero sample or not
+    stereo: u8,
+	// Default sample panning (if pan flag is set), 0...256
+	pan: u16,
+	// Default volume, 0...256 (ignored if uFlags[SMP_NODEFAULTVOLUME] is set)
+	volume: u16,
+	// Frequency of middle-C, in Hz (for IT/S3M/MPTM)
+	c5_speed: u32,
+	// Relative note to middle c (for MOD/XM)
+	relative_tone: i8,
+	// Finetune period (for MOD/XM), -128...127, unit is 1/128th of a semitone
+	fine_tune: i8,
+	// Auto vibrato type
+	vib_type: u8,
+	// Auto vibrato sweep (i.e. how long it takes until the vibrato effect reaches its full depth)
+	vib_sweep: u8,
+	// Auto vibrato depth
+	vib_depth: u8,
+	// Auto vibrato rate (speed)
+	vib_rate: u8,
+}
+
+impl CSampleData {
+    fn get_data(&self) -> Option<&[u8]> {
+        if self.data.is_null() || self.length == 0 {
+            None
+        } else {
+            unsafe { Some(std::slice::from_raw_parts(self.data, self.length as _)) }
+        }
+    }
+
+    fn get_text(&self) -> String {
+        get_string_cstr(self.sample_text)
+    }
+}
 
 #[repr(C)]
 struct CData {
     hash: u64,
-    sample_names: *const c_char,
-    artist: *const c_char,
-    comments: *const c_char,
-    channel_count: i32,
+    samples: *const CSampleData,
+    instrument_names: *const *const c_char,
+    sample_count: u32,
+    instrument_count: u32,
+    channel_count: u32,
+}
+
+impl CData {
+    fn get_samples(&self) -> &[CSampleData] {
+        unsafe { std::slice::from_raw_parts(self.samples, self.sample_count as _) }
+    }
+
+    fn get_instrument_names(&self) -> Vec<String> {
+        let mut output = Vec::new();
+        for i in 0..self.instrument_count {
+            let name = unsafe { get_string_cstr(*self.instrument_names.offset(i as _)) };
+            output.push(name);
+        }
+        output
+    }
 }
 
 extern "C" {
@@ -39,7 +102,24 @@ extern "C" {
 }
 
 fn get_string_cstr(c: *const c_char) -> String {
-    unsafe { std::ffi::CStr::from_ptr(c).to_string_lossy().into_owned() }
+    match unsafe { std::ffi::CStr::from_ptr(c).to_str() } {
+        //Ok(s) => if s.is_empty() { String::new() } else { format!("'{}'", s.to_owned()) },
+        Ok(s) => {
+            let t = s.replace("'", "''");
+            format!("'{}'", t)
+        }
+
+        Err(_) => "''".to_string(),
+    }
+}
+
+#[derive(Clone)]
+struct SampleInfo {
+    sample_id: u32,
+    sha256_hash: String,
+    text: String,
+    length_bytes: usize,
+    length: usize,
 }
 
 #[derive(Clone, Default)]
@@ -47,13 +127,14 @@ struct TrackInfo {
     pattern_hash: u64,
     sha256_hash: String,
     filename: String,
-    sample_names: String,
+    samples: Vec<SampleInfo>,
+    instrument_names: Vec<String>,
 }
 
-#[derive(Default, Debug, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone)]
 struct DatabaseMeta {
     filename: String,
-    samples: String,
+    samples: Vec<String>,
 }
 
 impl PartialEq for DatabaseMeta {
@@ -69,23 +150,6 @@ impl Hash for DatabaseMeta {
 }
 
 impl Eq for DatabaseMeta {}
-
-#[derive(Default, Serialize, Deserialize)]
-struct Database {
-    metadata: Vec<DatabaseMeta>,
-    sha_hash: HashMap<String, Vec<usize>>,
-    pattern_hash: HashMap<u64, Vec<usize>>,
-}
-
-impl Database {
-    fn new(size: usize) -> Database {
-        Database {
-            metadata: Vec::with_capacity(size),
-            sha_hash: HashMap::with_capacity(size),
-            pattern_hash: HashMap::with_capacity(size),
-        }
-    }
-}
 
 /// Modland hashing
 #[derive(Parser, Debug)]
@@ -212,12 +276,12 @@ impl Filters {
     }
 
     // Apply all the filters
-    fn apply_filter<'a>(
+    fn apply_filter(
         &self,
-        input: &[&'a DatabaseMeta],
+        input: &[DatabaseMeta],
         skip_level: usize,
-    ) -> Vec<&'a DatabaseMeta> {
-        let mut output = Vec::new();
+    ) -> Vec<DatabaseMeta> {
+        let mut output: Vec<DatabaseMeta> = Vec::new();
 
         for i in input {
             let filename = &i.filename;
@@ -228,7 +292,7 @@ impl Filters {
                 if Self::starts_with(filename, &self.include_paths, true)
                     && Self::ends_with(filename, &self.include_file_extensions, true)
                 {
-                    output.push(*i);
+                    output.push(i.clone());
                 }
             }
         }
@@ -252,8 +316,8 @@ impl Filters {
 
         if let Some(re) = self.sample_search.as_ref() {
             for file in &output {
-                if !file.samples.is_empty() {
-                    if re.is_match(&file.samples.to_ascii_lowercase()) {
+                for sample in &file.samples {
+                    if re.is_match(&sample.to_ascii_lowercase()) {
                         if output.len() >= skip_level {
                             return output;
                         } else {
@@ -321,8 +385,8 @@ fn get_files(path: &str, recurse: bool) -> Vec<String> {
 }
 
 fn get_url(filename: &str) -> String {
-    let url = filename.replace(" ", "%20");
-    format!("https://ftp.modland.com{}", url)
+    filename.replace("'", "''")
+    //format!("https://ftp.modland.com{}", url)
 }
 
 // Fetches info for a track/song
@@ -344,35 +408,40 @@ fn get_track_info(filename: &str, dump_patterns: bool) -> TrackInfo {
 
     if !song_data.is_null() {
         let hash_id = unsafe { (*song_data).hash };
-        let sample_names = unsafe { get_string_cstr((*song_data).sample_names) };
-        track_info.sample_names = sample_names;
+        let samples = unsafe { (*song_data).get_samples() }; 
         track_info.pattern_hash = hash_id;
+
+        for sample in samples {
+            let sha256_hash = if let Some(data) = sample.get_data() {
+                let hash = sha2::Sha256::digest(data);
+                format!("'{:x}'", hash)
+            } else {
+                "NULL".to_string()
+            };
+
+            track_info.samples.push(SampleInfo {
+                sample_id: sample.sample_id,
+                sha256_hash,
+                text: sample.get_text(),
+                length_bytes: sample.length_bytes as _,
+                length: sample.length as _,
+            });
+        }
+
+        let instrument_names = unsafe { (*song_data).get_instrument_names() };
+
+        for name in instrument_names {
+            track_info.instrument_names.push(name);
+        }
+
+        //let sample_names = unsafe { get_string_cstr((*song_data).sample_names) };
+        //track_info.sample_names = sample_names;
+        //track_info.pattern_hash = hash_id;
 
         unsafe { free_hash_data(song_data) };
     }
 
     track_info
-}
-
-// Check that database version is valid
-fn is_valid_db_version<P: AsRef<Path>>(path: P) -> Result<bool> {
-    let mut version: [u8; 4] = [0; 4];
-
-    log::trace!("Loading Database... [Reading]");
-
-    let mut file = File::open(path)?;
-    file.read(&mut version)?;
-
-    let v = ((version[0] as u32) << 24)
-        | ((version[1] as u32) << 16)
-        | ((version[2] as u32) << 8)
-        | ((version[3] as u32) << 0);
-
-    if v == DB_VERSION {
-        Ok(true)
-    } else {
-        Ok(false)
-    }
 }
 
 // Get the target filename
@@ -383,8 +452,91 @@ fn get_db_filename() -> String {
     path.into_os_string().into_string().unwrap()
 }
 
-// Updates the database with new entries
+enum DbCommand {
+    Insert(String), // Example command to insert a string
+    Quit,  // Example command to query a string
+}
+
+fn run_build_db_thread(filename: String, rx: Receiver<DbCommand>) {
+    let conn = Connection::open(filename).expect("Failed to open database");
+
+    conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
+
+    conn.execute("CREATE TABLE files (
+        song_id INTEGER PRIMARY KEY, 
+        hash_id TEXT NOT NULL, 
+        pattern_hash INTEGER, 
+        url TEXT NOT NULL
+        )",
+        [],
+    ).unwrap();
+
+    /*
+        c5_speed INTEGER,
+        pan INTEGER,
+        volume INTEGER,
+        global_vol INTEGER,
+        stereo INTEGER,
+        sample_bits INTEGER,
+        relative_tone INTEGER,
+        fine_tune INTEGER,
+        vibrato_type INTEGER,
+        vibrato_sweep INTEGER,
+        vibrato_depth INTEGER,
+        vibrato_rate INTEGER,
+    */
+
+    conn.execute("CREATE TABLE samples (
+        hash_id TEXT, 
+        song_id INTEGER, 
+        song_sample_id INTEGER,
+        text TEXT NOT NULL, 
+        length_bytes INTEGER,
+        length INTEGER,
+        FOREIGN KEY (song_id) REFERENCES files(song_id)
+        )",
+        [],
+    ).unwrap();
+
+    conn.execute("CREATE TABLE instruments (
+        hash_id TEXT, 
+        song_id INTEGER, 
+        text TEXT, 
+        FOREIGN KEY (song_id) REFERENCES files(song_id)
+        )",
+        [],
+    ).unwrap();
+
+    conn.execute("BEGIN TRANSACTION", []).unwrap();
+
+    // Listen for commands
+    for command in rx {
+        match command {
+            DbCommand::Insert(cmd) => { conn.execute(&cmd, [],).unwrap(); },
+            DbCommand::Quit => break,
+        }
+    }
+
+    conn.execute("COMMIT", []).unwrap();
+
+    conn.execute("CREATE INDEX hash_files ON files (hash_id)", []).unwrap();
+    conn.execute("CREATE INDEX pattern_files ON files (pattern_hash)", []).unwrap();
+    conn.execute("CREATE INDEX hash_samples ON samples (hash_id)", []).unwrap();
+    conn.execute("CREATE INDEX length_samples ON samples (length)", []).unwrap();
+    conn.execute("CREATE INDEX song_id_samples ON samples (song_id)", []).unwrap();
+}
+
 fn build_database(out_filename: &str, database_path: &str, args: &Args) {
+    // Channel for sending commands to the database thread
+    let (tx, rx): (Sender<DbCommand>, Receiver<DbCommand>) = mpsc::channel();
+
+    let filename = out_filename.to_owned();
+
+    // Spawn the database thread
+    let db_thread = std::thread::spawn(move || {
+        run_build_db_thread(filename, rx);
+    });
+
     let files = get_files(database_path, args.recursive);
 
     let spinner_style =
@@ -393,83 +545,52 @@ fn build_database(out_filename: &str, database_path: &str, args: &Args) {
     let pb = ProgressBar::new(files.len() as _);
     pb.set_style(spinner_style);
 
-    //let database = Mutex::new(Database::new(DB_SIZE));
-    let tracks_mt = Mutex::new(Vec::with_capacity(DB_SIZE));
-    pb.set_prefix("Hashing files");
+    pb.set_prefix("Building database");
 
-    files.par_iter().for_each(|input_path| {
+    files.par_iter().enumerate().for_each(|(index, input_path)| {
         let mut track = get_track_info(input_path, args.dump_patterns);
         track.filename = input_path.replace(database_path, "");
 
-        {
-            let mut tracks = tracks_mt.lock().unwrap();
-            tracks.push(track);
+        let t = track.pattern_hash & 0x7FFF_FFFF_FFFF_FFFF;
+        let pattern_hash = if t != 0 {
+            format!("{}", t)
+        } else {
+            "NULL".to_string()
+        }; 
+
+        let insert = format!("INSERT INTO files (song_id, hash_id, pattern_hash, url) VALUES ({}, '{}', {}, '{}')", 
+                index, 
+                &track.sha256_hash, 
+                pattern_hash, 
+                get_url(&track.filename));
+
+         tx.send(DbCommand::Insert(insert)).expect("Failed to send command");
+
+        for sample in &track.samples {
+            let insert = format!("INSERT INTO samples (hash_id, song_id, song_sample_id, text, length_bytes, length) VALUES ({}, {}, {}, {}, {}, {})", 
+                &sample.sha256_hash,
+                index, 
+                sample.sample_id, 
+                &sample.text, 
+                sample.length_bytes,
+                sample.length);
+
+            tx.send(DbCommand::Insert(insert)).expect("Failed to send command");
         }
 
         pb.inc(1);
     });
 
-    println!("Writing database to disk... [Encoding]");
+    println!("Writing database...");
 
-    let tracks = tracks_mt.lock().unwrap();
-    let mut db = Database::new(DB_SIZE);
+    tx.send(DbCommand::Quit).expect("Failed to send command");
+    db_thread.join().unwrap();
 
-    for (index, track) in tracks.iter().enumerate() {
-        if let Some(t) = db.sha_hash.get_mut(&track.sha256_hash) {
-            t.push(index);
-        } else {
-            db.sha_hash
-                .insert(track.sha256_hash.to_owned(), vec![index]);
-        }
-
-        if track.pattern_hash != 0 {
-            if let Some(t) = db.pattern_hash.get_mut(&track.pattern_hash) {
-                t.push(index);
-            } else {
-                db.pattern_hash.insert(track.pattern_hash, vec![index]);
-            }
-
-            db.metadata.push(DatabaseMeta {
-                filename: track.filename.to_owned(),
-                samples: track.sample_names.to_owned(),
-            });
-        } else {
-            db.metadata.push(DatabaseMeta {
-                filename: track.filename.to_owned(),
-                samples: String::new(),
-            });
-        }
-    }
-
-    //let db = database.lock().unwrap();
-    let encoded: Vec<u8> = bincode::serialize(&db).unwrap();
-
-    println!("Writing database to disk... [Compressing]");
-
-    let mut e = ZlibEncoder::new(Vec::new(), Compression::best());
-    e.write_all(&encoded).unwrap();
-    let compressed_bytes = e.finish().unwrap();
-
-    println!("Writing database to disk... [Writing]");
-
-    let database_version = [
-        (DB_VERSION >> 24) as u8,
-        (DB_VERSION >> 16) as u8,
-        (DB_VERSION >> 8) as u8,
-        (DB_VERSION >> 0) as u8,
-    ];
-
-    let mut file = File::create(out_filename).unwrap();
-    file.write_all(&database_version).unwrap();
-    file.write_all(&compressed_bytes).unwrap();
-
-    println!("Writing database to disk... [Done]");
+    println!("Done");
 }
 
-fn create_db_file() -> Result<File> {
-    let filename = get_db_filename();
-
-    if let Ok(file) = File::create(&filename) {
+fn create_db_file(filename: &str) -> Result<File> {
+    if let Ok(file) = File::create(filename) {
         return Ok(file);
     }
 
@@ -479,9 +600,12 @@ fn create_db_file() -> Result<File> {
     )
 }
 
-// Download the remote file
+// Download and upack the database 
 fn download_db_err() -> Result<()> {
-    let mut file = create_db_file()?;
+    let filename = format!("{}.7z", get_db_filename());
+    let mut file = create_db_file(&filename)?;
+
+    dbg!("Dowloading to ", &filename);
 
     let resp = ureq::get(DB_REMOTE).call()?;
     let len: usize = resp.header("Content-Length").unwrap().parse()?;
@@ -490,14 +614,10 @@ fn download_db_err() -> Result<()> {
     let mut reader = resp.into_reader();
 
     let pb = ProgressBar::new(len as _);
-    pb.set_style(
-        ProgressStyle::with_template(
-            "{prefix:.bold.dim} {spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes}",
-        )
+    pb.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})")
         .unwrap()
-        .with_key("eta", |state| format!("{:.1}s", state.eta().as_secs_f64()))
-        .progress_chars("#>-"),
-    );
+        .with_key("eta", |state: &ProgressState, w: &mut dyn std::fmt::Write| write!(w, "{:.1}s", state.eta().as_secs_f64()).unwrap())
+        .progress_chars("#>-"));
 
     pb.set_prefix("Downloading Database");
 
@@ -516,6 +636,59 @@ fn download_db_err() -> Result<()> {
         file.write_all(&temp_buffer[0..read_size])?;
     }
 
+
+    Ok(())
+}
+
+fn decompress_db() -> Result<()> {
+    let filename = format!("{}.7z", get_db_filename());
+
+    // Check if compressed file exists and unpack it
+    if !Path::new(&filename).exists() {
+        return Ok(());
+    }
+
+    let mut sz = sevenz_rust::SevenZReader::open(&filename, "pass".into()).unwrap();
+    let total_size: u64 = sz
+        .archive()
+        .files
+        .iter()
+        .filter(|e| e.has_stream())
+        .map(|e| e.size())
+        .sum();
+
+    let pb = ProgressBar::new(total_size as _);
+    pb.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+        .unwrap()
+        .with_key("eta", |state: &ProgressState, w: &mut dyn std::fmt::Write| write!(w, "{:.1}s", state.eta().as_secs_f64()).unwrap())
+        .progress_chars("#>-"));
+
+    pb.set_prefix("Decompressing Database");
+
+    let mut uncompressed_size = 0;
+    let dest = PathBuf::from(std::env::current_exe()?);
+    sz.for_each_entries(|entry, reader| {
+        let mut buf = [0u8; 1024];
+        let path = dest.join(entry.name());
+        dbg!(&path);
+        //std::fs::create_dir_all(path.parent().unwrap())?;
+        let mut file = File::create(get_db_filename()).unwrap();
+        loop {
+            let read_size = reader.read(&mut buf).unwrap();
+            if read_size == 0 {
+                break Ok(true);
+            }
+            file.write_all(&buf[..read_size])?;
+            uncompressed_size += read_size;
+
+            pb.set_position(uncompressed_size as _);
+        }
+    })
+    .unwrap();
+
+    // delete the compressed file
+    std::fs::remove_file(&filename)?;
+
     Ok(())
 }
 
@@ -529,48 +702,6 @@ fn download_db() {
     }
 }
 
-fn load_database(filename: &str) -> Result<Database> {
-    let mut data = Vec::new();
-    let mut decompressed_data = Vec::new();
-    let mut version: [u8; 4] = [0, 0, 0, 0];
-
-    let total_time = time::Instant::now();
-    let now = time::Instant::now();
-
-    let mut file = std::fs::File::open(filename)?;
-    file.read(&mut version)?;
-    file.read_to_end(&mut data)?;
-
-    println!(
-        "Loading Database... [Read file]    ({} ms)",
-        now.elapsed().as_millis(),
-    );
-
-    let now = time::Instant::now();
-
-    let mut z = ZlibDecoder::new(&data[..]);
-    z.read_to_end(&mut decompressed_data)?;
-
-    println!(
-        "Loading Database... [Decompressed] ({} ms)",
-        now.elapsed().as_millis(),
-    );
-
-    let now = time::Instant::now();
-    let datbase: Database = bincode::deserialize(&decompressed_data[..])?;
-
-    println!(
-        "Loading Database... [Decoded]      ({} ms)",
-        now.elapsed().as_millis(),
-    );
-
-    println!(
-        "Loading Database... [Done]         ({} ms)",
-        total_time.elapsed().as_millis(),
-    );
-
-    Ok(datbase)
-}
 
 /*
     let re = Regex::new(search_string).unwrap();
@@ -591,33 +722,65 @@ fn load_database(filename: &str) -> Result<Database> {
 }
      */
 
-fn get_files_from_sha_hash<'a>(info: &TrackInfo, lookup: &'a Database) -> Vec<&'a DatabaseMeta> {
+fn get_files_from_sha_hash(info: &TrackInfo, db: &Connection) -> Result<Vec<DatabaseMeta>> {
     let mut entries = Vec::new();
 
-    if let Some(res) = lookup.sha_hash.get(&info.sha256_hash) {
-        for v in res {
-            entries.push(&lookup.metadata[*v]);
+    let mut stmnt = db.prepare("SELECT song_id, url  FROM files WHERE hash_id = :hash")?;
+    let mut rows = stmnt.query(&[(":hash", &info.sha256_hash)])?;
+        
+    let mut stmnt = db.prepare("SELECT text FROM samples WHERE song_id = :song_id ORDER BY song_sample_id").unwrap();
+
+    while let Some(row) = rows.next()? {
+        let song_id: u64 = row.get(0)?;
+        let filename: String = row.get(1)?;
+        let mut samples = Vec::new();
+
+        let mut rows = stmnt.query(&[(":song_id", &song_id)])?;
+
+        while let Some(row) = rows.next()? {
+            let text: String = row.get(0).unwrap();
+            samples.push(text);
         }
+
+        entries.push(DatabaseMeta { filename, samples });
     }
 
-    entries
+    Ok(entries)
 }
 
-fn get_files_from_pattern_hash<'a>(
-    info: &TrackInfo,
-    lookup: &'a Database,
-) -> Vec<&'a DatabaseMeta> {
+fn get_files_from_pattern_hash<'a>(info: &TrackInfo, db: &Connection) -> Result<Vec<DatabaseMeta>> {
     let mut entries = Vec::new();
-    if let Some(res) = lookup.pattern_hash.get(&info.pattern_hash) {
-        for v in res {
-            entries.push(&lookup.metadata[*v]);
-        }
+
+    if info.pattern_hash == 0 {
+        return Ok(entries);
     }
 
-    entries
+    let pattern_hash = info.pattern_hash & 0x7FFF_FFFF_FFFF_FFFF;
+
+    let mut stmnt = db.prepare("SELECT song_id, url  FROM files WHERE pattern_hash = :hash")?;
+    let mut rows = stmnt.query(&[(":hash", &pattern_hash)])?;
+        
+    let mut stmnt = db.prepare("SELECT text FROM samples WHERE song_id = :song_id ORDER BY song_sample_id").unwrap();
+
+    while let Some(row) = rows.next()? {
+        let song_id: u64 = row.get(0)?;
+        let filename: String = row.get(1)?;
+        let mut samples = Vec::new();
+
+        let mut rows = stmnt.query(&[(":song_id", &song_id)])?;
+
+        while let Some(row) = rows.next()? {
+            let text: String = row.get(0).unwrap();
+            samples.push(text);
+        }
+
+        entries.push(DatabaseMeta { filename, samples });
+    }
+
+    Ok(entries)
 }
 
-fn print_samples_with_outline(samples: &str, match_reg: &Option<Regex>) {
+fn print_samples_with_outline(samples: &[String], match_reg: &Option<Regex>) {
     if samples.is_empty() {
         return;
     }
@@ -625,7 +788,7 @@ fn print_samples_with_outline(samples: &str, match_reg: &Option<Regex>) {
     // figure out the max len of the lines
     let mut last_line_with_text = 0;
     let mut max_len = 0;
-    for (index, line) in samples.lines().enumerate() {
+    for (index, line) in samples.iter().enumerate() {
         max_len = std::cmp::max(line.chars().count(), max_len);
         if !line.is_empty() {
             last_line_with_text = index;
@@ -643,7 +806,7 @@ fn print_samples_with_outline(samples: &str, match_reg: &Option<Regex>) {
 
     println!("┐");
 
-    for (index, line) in samples.lines().enumerate() {
+    for (index, line) in samples.iter().enumerate() {
         print!("│ ");
         print!("{}", line);
 
@@ -675,7 +838,7 @@ fn print_samples_with_outline(samples: &str, match_reg: &Option<Regex>) {
 }
 
 fn print_found_entries(
-    inital_samples: &str,
+    inital_samples: &[String],
     entries: &HashMap<&DatabaseMeta, (bool, bool)>,
     args: &Args,
     search_sample: &Option<Regex>,
@@ -708,25 +871,23 @@ fn print_found_entries(
         }
     }
 
-    /*
     if vals.is_empty() {
         println!("No matches found!");
     }
-    */
 }
 
-fn match_dir_against_db(dir: &str, args: &Args, lookup: &Database) {
+fn match_dir_against_db(dir: &str, args: &Args, db: &Connection) -> Result<()> {
     let files = get_files(dir, args.recursive);
     let filters = Filters::new(args);
 
     //files.par_iter().for_each(|filename| {
-    files.iter().for_each(|filename| {
-        let info = get_track_info(filename, args.dump_patterns);
+    for filename in files {
+        let info = get_track_info(&filename, args.dump_patterns);
 
-        //println!("Matching {}", filename);
+        println!("Matching {}", filename);
 
-        let filenames = get_files_from_sha_hash(&info, lookup);
-        let filenames_pattern = get_files_from_pattern_hash(&info, lookup);
+        let filenames = get_files_from_sha_hash(&info, db)?;
+        let filenames_pattern = get_files_from_pattern_hash(&info, db)?;
 
         let filenames = filters.apply_filter(&filenames, 1);
         let filenames_pattern = filters.apply_filter(&filenames_pattern, 1);
@@ -734,26 +895,30 @@ fn match_dir_against_db(dir: &str, args: &Args, lookup: &Database) {
         let mut found_entries = HashMap::new();
 
         for entry in &filenames {
-            found_entries.insert(*entry, (true, false));
+            found_entries.insert(entry, (true, false));
         }
 
         for entry in &filenames_pattern {
-            if let Some(v) = found_entries.get_mut(*entry) {
+            if let Some(v) = found_entries.get_mut(entry) {
                 v.1 = true;
             } else {
                 found_entries.insert(entry, (false, true));
             }
         }
 
+        let sample_names: Vec<String> = info.samples.iter().map(|s| s.text.to_owned()).collect();
+
         print_found_entries(
-            &info.sample_names,
+            &sample_names,
             &found_entries,
             args,
             &filters.sample_search,
         );
 
-        //println!();
-    });
+        println!();
+    }
+
+    Ok(())
 }
 
 // First check if we have a database next to the to the exe, otherwise try local directory
@@ -767,10 +932,10 @@ fn check_for_db_file() -> Option<PathBuf> {
     None
 }
 
-fn print_db_duplicates(db: &Database, args: &Args) {
+/*
+fn print_db_duplicates(db: &Connection, args: &Args) -> Result<()> {
     let mut hash_dupes = Vec::with_capacity(700_0000);
     let mut pattern_dupes = Vec::with_capacity(700_0000);
-    let metadata = &db.metadata;
     let filters = Filters::new(args);
 
     for (_key, val) in db.sha_hash.iter() {
@@ -845,7 +1010,9 @@ fn print_db_duplicates(db: &Database, args: &Args) {
         }
     }
 }
+*/
 
+/*
 fn print_db(db: &Database, args: &Args) {
     let mut entries = Vec::with_capacity(700_0000);
     let metadata = &db.metadata;
@@ -880,6 +1047,7 @@ fn print_db(db: &Database, args: &Args) {
         }
     }
 }
+*/
 
 fn main() -> Result<()> {
     let args = Args::parse();
@@ -890,6 +1058,7 @@ fn main() -> Result<()> {
     // first we check if we have a database and if we don't we try to download it we don't
     // or if the database version doesn't match
 
+    dbg!();
     if let Some(db_path) = args.build_database.as_ref() {
         let filename = get_db_filename();
 
@@ -904,20 +1073,21 @@ fn main() -> Result<()> {
 
     let database_path = check_for_db_file();
 
+    dbg!();
     if args.download_database || database_path.is_none() {
         download_db();
     }
 
-    if let Some(path) = database_path {
-        if !is_valid_db_version(path)? {
-            println!("Database version doesn't match executable. Downloading");
-            download_db();
-        }
-    }
+    dbg!();
+    decompress_db().unwrap();
+    dbg!();
 
-    println!("Loading database...");
+    dbg!();
+    let conn = Connection::open(&get_db_filename()).unwrap();
+    dbg!();
 
-    let database = load_database(&get_db_filename()).unwrap();
+    
+    /*
 
     // Process duplicates in the database
     if args.list_duplicateds_in_database {
@@ -930,62 +1100,8 @@ fn main() -> Result<()> {
         print_db(&database, &args);
         return Ok(());
     }
+    */
 
-    match_dir_against_db(&args.match_dir, &args, &database);
-
-    Ok(())
+    match_dir_against_db(&args.match_dir, &args, &conn)
 }
 
-/*
-let mut output = String::with_capacity(10 * 1024 * 1024);
-let mut count = 0;
-let map = data.lock().unwrap();
-
-//output.push_str(HTML_HEADER);
-
-let mut dupe_array = Vec::new();
-
-for (_key, val) in map.iter() {
-    if val.len() > 1 {
-        dupe_array.push(val);
-    }
-}open_in_memory
-
-        if t.filename.contains("pub/favourites") {
-            found_unknown = false;
-            break;
-        }
-    }
-
-    if found_unknown {
-        output.push_str(&format!("Dupe {}\n", count));
-        output.push_str("----------------------\n\n");
-
-        for t in val {
-            let name = &t.filename[18..];
-            let url_name = name.replace(" ", "%20");
-            output.push_str(&format!("[{}](https://{})\n", name, url_name));
-            output.push_str("```\n");
-            output.push_str(&t.sample_names.trim_end_matches('\n'));
-            output.push_str("\n```\n");
-        }
-        count += 1;
-    }
-}
-*/
-
-/*
-static HTML_HEADER: &str =
-    "<html xmlns=\"http://www.w3.org/1999/xhtml\" xml:lang=\"en\" lang=\"en\">
-<head>
-    <style type=\"text/css\" media=\"screen\">
-        body {Write;
-            border: 1px solid #999;
-            display: block;
-            padding: 20px;
-        }
-    </style>
-</head>
-
-";
- */
