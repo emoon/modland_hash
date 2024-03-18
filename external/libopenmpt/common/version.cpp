@@ -147,7 +147,7 @@ static int GetRevision()
 		}
 		return mpt::parse<int>(svnversion);
 	#else
-		MPT_WARNING_STATEMENT("SVN revision unknown. Please check your build system.");
+		//MPT_WARNING_STATEMENT("SVN revision unknown. Please check your build system.");
 		return 0;
 	#endif
 }
