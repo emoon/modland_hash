@@ -105,7 +105,7 @@ fn get_string_cstr(c: *const c_char) -> String {
     match unsafe { std::ffi::CStr::from_ptr(c).to_str() } {
         //Ok(s) => if s.is_empty() { String::new() } else { format!("'{}'", s.to_owned()) },
         Ok(s) => {
-            let t = s.replace("'", "''");
+            let t = s.replace('\'', "''");
             format!("'{}'", t)
         }
 
@@ -151,63 +151,64 @@ impl Hash for DatabaseMeta {
 
 impl Eq for DatabaseMeta {}
 
-/// Modland hashing
+
+/// Module for hashing
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 struct Args {
-    /// Builds a new database given a local directory
+    /// Builds a new database from a given local directory
     #[clap(short, long)]
     build_database: Option<String>,
 
-    /// Download the remote database (done automaticlly if it doesn't exist)
+    /// Downloads the remote database (automatically performed if it doesn't exist)
     #[clap(short, long)]
     download_database: bool,
 
-    /// Directory to search against the database. If not specificed the current directory will be used.
+    /// Directory to search against the database. If not specified, the current directory will be used.
     #[clap(short, long, default_value = ".")]
     match_dir: String,
 
-    /// Do recurseive scanning (include sub-directories) when using --match-dir and --build-database
+    /// Performs recursive scanning (includes sub-directories) when using --match-dir and --build-database
     #[clap(short, long)]
     recursive: bool,
 
-    /// If any duplicates includes these file extensions, they will be skipped. Example: --skip-file-extensions "mdx,pdx" will skip all dupes containing .mdx and .pdx files (ignores case)
+    /// Skips files with these extensions if any duplicates are found. Example: --skip-file-extensions "mdx,pdx" will skip all duplicates that contain .mdx and .pdx files (case-insensitive)
     #[clap(long, default_value = "")]
     exclude_file_extensions: String,
 
-    /// If any duplicate match these paths, they will be skipped. Example: --exclude-paths "/pub/favourites" will only show show results where "/pub/favourites" isn't present.
+    /// Skips duplicates that match these paths. Example: --exclude-paths "/pub/favourites" will exclude results where "/pub/favourites" is present.
     #[clap(long, default_value = "")]
     exclude_paths: String,
 
-    /// Only include If any duplicates includes these file extensions, other files will be skipped. Example: --include-file-extensions "mod,xm" will only show matches for .mod and .xm files
+    /// Includes only duplicates with these file extensions; other files will be skipped. Example: --include-file-extensions "mod,xm" will include only matches for .mod and .xm files
     #[clap(short, long, default_value = "")]
     include_file_extensions: String,
 
-    /// Only include match if any duplicates maches these/this file path(s). Example: --include-paths "/incoming" will only show results when at least one file matches "/incoming"
+    /// Includes matches only if duplicates match these file paths. Example: --include-paths "/incoming" will show results only when at least one file matches "/incoming"
     #[clap(long, default_value = "")]
     include_paths: String,
 
-    /// Only include match if one of the duplicates matches the regexp pattern. Example: --include_sample_name ".*ripped.*" will only show duplicates where one of the tracks includes sample name(s) include "ripped"
+    /// Includes matches only if one of the duplicates matches the specified regexp pattern for sample names. Example: --include_sample_name ".*ripped.*" will include duplicates where one of the tracks' sample names contains "ripped"
     #[clap(long, default_value = "")]
     include_sample_name: String,
 
-    /// Only display duplicate results if one of the hits include the maching filename. Example --search-filename ".*north.*" will only include dupe resutls if one of the entries has .*north.* in it (case-insensitive)
+    /// Displays duplicate results only if one of the entries includes a matching filename. Example: --search-filename ".*north.*" will include results only if one of the entries has "north" in it (case-insensitive)
     #[clap(long, default_value = "")]
     search_filename: String,
 
-    /// Makes it possible to print sample names
+    /// Enables printing of sample names
     #[clap(short, long)]
     print_sample_names: bool,
 
-    /// List existing duplicates in the database
+    /// Lists existing duplicates in the database
     #[clap(short, long)]
-    list_duplicateds_in_database: bool,
+    list_duplicates_in_database: bool,
 
-    /// Dumps all info in the database
+    /// Dumps all information in the database
     #[clap(long)]
     list_database: bool,
 
-    /// Mostly a debug option to allow dumping pattern data when both building database and matching entries
+    /// Primarily a debug option to allow dumping of pattern data when building the database and matching entries
     #[clap(long)]
     dump_patterns: bool,
 }
@@ -229,7 +230,7 @@ impl Filters {
 
         let mut output = Vec::new();
 
-        for t in filter.split(",") {
+        for t in filter.split(',') {
             output.push(format!("{}{}", prefix, t));
         }
 
@@ -282,14 +283,12 @@ impl Filters {
         for i in input {
             let filename = &i.filename;
 
-            if !Self::starts_with(filename, &self.exclude_paths, false)
+            if !Self::starts_with(filename, &self.exclude_paths, false) 
                 && !Self::ends_with(filename, &self.exclude_file_extensions, false)
+                && Self::starts_with(filename, &self.include_paths, true)
+                && Self::ends_with(filename, &self.include_file_extensions, true) 
             {
-                if Self::starts_with(filename, &self.include_paths, true)
-                    && Self::ends_with(filename, &self.include_file_extensions, true)
-                {
-                    output.push(i.clone());
-                }
+                output.push(i.clone());
             }
         }
 
@@ -297,11 +296,9 @@ impl Filters {
             let mut found_filename = false;
 
             for file in &output {
-                if !file.samples.is_empty() {
-                    if re.is_match(&file.filename.to_ascii_lowercase()) {
-                        found_filename = true;
-                        break;
-                    }
+                if !file.samples.is_empty() && re.is_match(&file.filename.to_ascii_lowercase()) {
+                    found_filename = true;
+                    break;
                 }
             }
 
@@ -381,14 +378,14 @@ fn get_files(path: &str, recurse: bool) -> Vec<String> {
 }
 
 fn get_url(filename: &str) -> String {
-    filename.replace("'", "''")
+    filename.replace('\'', "''")
     //format!("https://ftp.modland.com{}", url)
 }
 
 // Fetches info for a track/song
 fn get_track_info(filename: &str, dump_patterns: bool) -> TrackInfo {
     // Calculate sha256 of the file
-    let mut file = File::open(&filename).unwrap();
+    let mut file = File::open(filename).unwrap();
     let mut file_data = Vec::new();
     file.read_to_end(&mut file_data).unwrap();
     let hash = sha2::Sha256::digest(&file_data);
@@ -453,10 +450,10 @@ enum DbCommand {
     Quit,           // Example command to query a string
 }
 
-fn run_build_db_thread(filename: String, rx: Receiver<DbCommand>) {
+fn run_build_db_thread(filename: String, rx: Receiver<DbCommand>) -> Result<()> {
     let conn = Connection::open(filename).expect("Failed to open database");
 
-    conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
+    conn.execute("PRAGMA foreign_keys = ON", [])?;
 
     conn.execute(
         "CREATE TABLE files (
@@ -495,8 +492,7 @@ fn run_build_db_thread(filename: String, rx: Receiver<DbCommand>) {
         FOREIGN KEY (song_id) REFERENCES files(song_id)
         )",
         [],
-    )
-    .unwrap();
+    )?;
 
     conn.execute(
         "CREATE TABLE instruments (
@@ -506,33 +502,28 @@ fn run_build_db_thread(filename: String, rx: Receiver<DbCommand>) {
         FOREIGN KEY (song_id) REFERENCES files(song_id)
         )",
         [],
-    )
-    .unwrap();
+    )?;
 
-    conn.execute("BEGIN TRANSACTION", []).unwrap();
+    conn.execute("BEGIN TRANSACTION", [])?;
 
     // Listen for commands
     for command in rx {
         match command {
             DbCommand::Insert(cmd) => {
-                conn.execute(&cmd, []).unwrap();
+                conn.execute(&cmd, [])?;
             }
             DbCommand::Quit => break,
         }
     }
 
-    conn.execute("COMMIT", []).unwrap();
+    conn.execute("COMMIT", [])?;
+    conn.execute("CREATE INDEX hash_files ON files (hash_id)", [])?;
+    conn.execute("CREATE INDEX pattern_files ON files (pattern_hash)", [])?;
+    conn.execute("CREATE INDEX hash_samples ON samples (hash_id)", [])?;
+    conn.execute("CREATE INDEX length_samples ON samples (length)", [])?;
+    conn.execute("CREATE INDEX song_id_samples ON samples (song_id)", [])?;
 
-    conn.execute("CREATE INDEX hash_files ON files (hash_id)", [])
-        .unwrap();
-    conn.execute("CREATE INDEX pattern_files ON files (pattern_hash)", [])
-        .unwrap();
-    conn.execute("CREATE INDEX hash_samples ON samples (hash_id)", [])
-        .unwrap();
-    conn.execute("CREATE INDEX length_samples ON samples (length)", [])
-        .unwrap();
-    conn.execute("CREATE INDEX song_id_samples ON samples (song_id)", [])
-        .unwrap();
+    Ok(())
 }
 
 fn build_database(out_filename: &str, database_path: &str, args: &Args) {
@@ -543,7 +534,7 @@ fn build_database(out_filename: &str, database_path: &str, args: &Args) {
 
     // Spawn the database thread
     let db_thread = std::thread::spawn(move || {
-        run_build_db_thread(filename, rx);
+        run_build_db_thread(filename, rx).unwrap();
     });
 
     let files = get_files(database_path, args.recursive);
@@ -760,7 +751,7 @@ fn get_files_from_sha_hash(info: &TrackInfo, db: &Connection) -> Result<Vec<Data
     Ok(entries)
 }
 
-fn get_files_from_pattern_hash<'a>(info: &TrackInfo, db: &Connection) -> Result<Vec<DatabaseMeta>> {
+fn get_files_from_pattern_hash(info: &TrackInfo, db: &Connection) -> Result<Vec<DatabaseMeta>> {
     let mut entries = Vec::new();
 
     if info.pattern_hash == 0 {
@@ -859,7 +850,7 @@ fn print_found_entries(
         let url = get_url(&val.0.filename);
         if args.print_sample_names {
             if !printed_initial_samples && args.print_sample_names {
-                print_samples_with_outline(&inital_samples, search_sample);
+                print_samples_with_outline(inital_samples, search_sample);
                 printed_initial_samples = true;
             }
             println!("Found match {} (pattern_hash)", url);
@@ -868,7 +859,6 @@ fn print_found_entries(
             println!("Found match {} (hash) (pattern_hash)", url);
         } else if val.1 .0 && !val.1 .1 {
             println!("Found match {} (hash)", url);
-        } else if args.print_sample_names {
         } else {
             println!("Found match {} (pattern_hash)", url);
         }
@@ -923,11 +913,10 @@ fn match_dir_against_db(dir: &str, args: &Args, db: &Connection) -> Result<()> {
 fn check_for_db_file() -> Option<PathBuf> {
     let path = Path::new(&get_db_filename()).to_path_buf();
     if path.exists() {
-        return Some(path);
+        Some(path)
     } else {
+        None
     }
-
-    None
 }
 
 /*
@@ -1077,7 +1066,7 @@ fn main() -> Result<()> {
         decompress_db(None)?;
     }
 
-    let conn = Connection::open(&get_db_filename())?;
+    let conn = Connection::open(get_db_filename())?;
 
     /*
 
