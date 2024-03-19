@@ -172,6 +172,10 @@ struct Args {
     #[clap(short, long)]
     recursive: bool,
 
+    /// Instead of matching on hash or pattern hash match the samples in the files 
+    #[clap(long)]
+    match_samples: bool,
+
     /// Skips files with these extensions if any duplicates are found. Example: --skip-file-extensions "mdx,pdx" will skip all duplicates that contain .mdx and .pdx files (case-insensitive)
     #[clap(long, default_value = "")]
     exclude_file_extensions: String,
@@ -909,6 +913,86 @@ fn match_dir_against_db(dir: &str, args: &Args, db: &Connection) -> Result<()> {
     Ok(())
 }
 
+struct MachingSampleData {
+    filename: String,
+    text: String,
+    sample_id: i64,
+}
+
+fn match_samples(dir: &str, db: &Connection, args: &Args) -> Result<()> {
+    let files = get_files(dir, args.recursive);
+
+    for filename in files {
+        let info = get_track_info(&filename, args.dump_patterns);
+        let mut matched_samples = Vec::new();
+
+        if info.samples.is_empty() {
+            continue;
+        }
+        
+        let mut last_line_with_text = 0;
+        let mut max_len = 0;
+        for line in &info.samples {
+            max_len = std::cmp::max(line.text.chars().count(), max_len);
+        }
+
+        max_len += 2;
+
+        println!("Matching {} for duplicated samples", filename);
+
+        for sample in &info.samples {
+            let statement = format!("
+                SELECT song_sample_id, text, files.url 
+                FROM samples JOIN files ON samples.song_id = files.song_id WHERE samples.hash_id = {}",
+                sample.sha256_hash);
+
+            let mut stmnt = db.prepare(&statement)?;
+
+            //println!("SELECT text FROM samples WHERE hash_id = {}", sample.sha256_hash);
+            //dbg!(&sample.text, &sample.sha256_hash);
+
+            //let mut rows = stmnt.query(params![&sample.sha256_hash])?;
+            let mut rows = stmnt.query([])?;
+            let mut matching_data = Vec::new();
+
+            while let Some(row) = rows.next()? {
+                let sample_id: i64 = row.get(0)?;
+                let text: String = row.get(1)?;
+                let url: String = row.get(2)?;
+
+                matching_data.push(MachingSampleData {
+                    filename: url,
+                    text,
+                    sample_id,
+                });
+            }
+
+            print!("{:02} {}", sample.sample_id, sample.text);
+
+            for _ in sample.text.chars().count()..max_len - 1 {
+                print!(" ");
+            }
+
+            println!("({} duplicates) length {}", matching_data.len(), sample.length);
+
+            if !matching_data.is_empty() {
+                matched_samples.push(matching_data);
+            }
+        }
+
+        /*
+        for matching in matched_samples {
+            for m in matching {
+                println!("Found match {} (sample_id: {})", m.filename, m.sample_id);
+                println!("Sample text: {}", m.text);
+            }
+        }
+        */
+    }
+
+    Ok(())
+}
+
 // First check if we have a database next to the to the exe, otherwise try local directory
 fn check_for_db_file() -> Option<PathBuf> {
     let path = Path::new(&get_db_filename()).to_path_buf();
@@ -1077,6 +1161,10 @@ fn main() -> Result<()> {
     // Process duplicates in the database
     if args.list_duplicates_in_database {
         return print_db_duplicates(&conn, &args);
+    }
+
+    if args.match_samples {
+        return match_samples(&args.match_dir, &conn, &args);
     }
 
     // Process duplicates in the database
