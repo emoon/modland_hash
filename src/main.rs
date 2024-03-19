@@ -3,7 +3,7 @@ use clap::Parser;
 use indicatif::{ProgressBar, ProgressState, ProgressStyle};
 use rayon::prelude::*;
 use regex::Regex;
-use rusqlite::Connection;
+use rusqlite::{params, Connection, types::ValueRef};
 use sha2::Digest;
 use simple_logger::SimpleLogger;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -919,54 +919,76 @@ fn check_for_db_file() -> Option<PathBuf> {
     }
 }
 
-/*
-fn print_db_duplicates(db: &Connection, args: &Args) -> Result<()> {
+fn get_dupes(db: &Connection, args: &Args, get_songs_query: &str, get_by_id: &str, dupe_limit: usize) -> Result<Vec<Vec<DatabaseMeta>>> {
     let mut hash_dupes = Vec::with_capacity(700_0000);
-    let mut pattern_dupes = Vec::with_capacity(700_0000);
     let filters = Filters::new(args);
 
-    for (_key, val) in db.sha_hash.iter() {
-        if val.len() <= 1 {
+    let mut stmnt = db.prepare(get_songs_query)?;
+    let mut rows = stmnt.query([])?;
+
+    let mut stmnt = db.prepare(get_by_id)?;
+
+    while let Some(row) = rows.next()? {
+        let v = row.get_ref(0)?;
+        let mut vals = Vec::with_capacity(10);
+        let mut song_ids = Vec::with_capacity(10);
+
+        let mut song_rows = match v {
+            ValueRef::Null => continue,
+            ValueRef::Integer(v) => stmnt.query(params![v])?,
+            ValueRef::Text(v) => stmnt.query(params![std::str::from_utf8(v)?])?,
+            _ => panic!(),
+        };
+        
+        while let Some(row) = song_rows.next()? {
+            let song_id: u64 = row.get(0)?;
+            let filename: String = row.get(1)?;
+            let metadata = DatabaseMeta {
+                filename,
+                samples: Vec::new(), 
+            };
+            vals.push(metadata);
+            song_ids.push(song_id);
+        }
+
+        if vals.len() <= dupe_limit {
             continue;
         }
 
-        let mut vals = Vec::with_capacity(val.len());
-
-        for v in val {
-            vals.push(&metadata[*v]);
+        if filters.sample_search.is_some() || args.print_sample_names {
+            for (metadata, song_id) in vals.iter_mut().zip(song_ids.iter()) {
+                let t = get_samples_from_song_id(db, *song_id)?;
+                metadata.samples = t; 
+            }
         }
 
         let mut vals = filters.apply_filter(&vals, 2);
 
         if !vals.is_empty() {
-            // sort the individual entries
             vals.sort_by(|a, b| a.filename.cmp(&b.filename));
             hash_dupes.push(vals);
         }
     }
 
-    for (_key, val) in db.pattern_hash.iter() {
-        if val.len() <= 1 {
-            continue;
-        }
-
-        let mut vals = Vec::with_capacity(val.len());
-
-        for v in val {
-            vals.push(&metadata[*v]);
-        }
-
-        let mut vals = filters.apply_filter(&vals, 2);
-
-        if !vals.is_empty() {
-            // sort the individual entries
-            vals.sort_by(|a, b| a.filename.cmp(&b.filename));
-            pattern_dupes.push(vals);
-        }
-    }
-
-    // sort the whole array to have deterministic output
     hash_dupes.sort_by(|a, b| a[0].filename.cmp(&b[0].filename));
+
+    Ok(hash_dupes)
+}
+
+fn print_db_duplicates(db: &Connection, args: &Args) -> Result<()> {
+    let filters = Filters::new(args);
+
+    let hash_dupes = get_dupes(
+        db, args, 
+        "SELECT hash_id FROM files",
+        "SELECT song_id, url FROM files where hash_id = ?",
+        1)?;
+
+    let pattern_dupes = get_dupes(
+        db, args, 
+        "SELECT pattern_hash FROM files",
+        "SELECT song_id, url FROM files where pattern_hash = ?",
+        1)?;
 
     for (index, v) in hash_dupes.iter().enumerate() {
         println!("\n==================================================================");
@@ -981,9 +1003,6 @@ fn print_db_duplicates(db: &Connection, args: &Args) -> Result<()> {
         }
     }
 
-    // sort the whole array to have deterministic output
-    pattern_dupes.sort_by(|a, b| a[0].filename.cmp(&b[0].filename));
-
     for (index, v) in pattern_dupes.iter().enumerate() {
         println!("\n==================================================================");
         println!("Dupe Entry {} (pattern_hash)", index);
@@ -996,33 +1015,18 @@ fn print_db_duplicates(db: &Connection, args: &Args) -> Result<()> {
             }
         }
     }
-}
-*/
 
-/*
-fn print_db(db: &Database, args: &Args) {
-    let mut entries = Vec::with_capacity(700_0000);
-    let metadata = &db.metadata;
+    Ok(())
+}
+
+fn print_db(db: &Connection, args: &Args) -> Result<()> {
     let filters = Filters::new(args);
 
-    for (_key, val) in db.sha_hash.iter() {
-        let mut vals = Vec::with_capacity(val.len());
-
-        for v in val {
-            vals.push(&metadata[*v]);
-        }
-
-        let mut vals = filters.apply_filter(&vals, 0);
-
-        if !vals.is_empty() {
-            // sort the individual entries
-            vals.sort_by(|a, b| a.filename.cmp(&b.filename));
-            entries.push(vals);
-        }
-    }
-
-    // sort the whole array to have deterministic output
-    entries.sort_by(|a, b| a[0].filename.cmp(&b[0].filename));
+    let entries = get_dupes(
+        db, args, 
+        "SELECT hash_id FROM files",
+        "SELECT song_id, url FROM files where hash_id = ?",
+        0)?;
 
     for (_index, v) in entries.iter().enumerate() {
         for e in v {
@@ -1033,8 +1037,9 @@ fn print_db(db: &Database, args: &Args) {
             }
         }
     }
+
+    Ok(())
 }
-*/
 
 fn main() -> Result<()> {
     let args = Args::parse();
@@ -1068,20 +1073,16 @@ fn main() -> Result<()> {
 
     let conn = Connection::open(get_db_filename())?;
 
-    /*
 
     // Process duplicates in the database
-    if args.list_duplicateds_in_database {
-        print_db_duplicates(&database, &args);
-        return Ok(());
+    if args.list_duplicates_in_database {
+        return print_db_duplicates(&conn, &args);
     }
 
     // Process duplicates in the database
     if args.list_database {
-        print_db(&database, &args);
-        return Ok(());
+        return print_db(&conn, &args);
     }
-    */
 
     match_dir_against_db(&args.match_dir, &args, &conn)
 }
