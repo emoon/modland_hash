@@ -725,10 +725,10 @@ fn download_db() {
 fn get_files_from_sha_hash(info: &TrackInfo, db: &Connection) -> Result<Vec<DatabaseMeta>> {
     let mut entries = Vec::new();
 
-    let mut stmnt = db.prepare("SELECT song_id, url  FROM files WHERE hash_id = :hash")?;
+    let mut stmnt = db.prepare("SELECT song_id, url FROM files WHERE hash_id = :hash")?;
     let mut rows = stmnt.query(&[(":hash", &info.sha256_hash)])?;
         
-    let mut stmnt = db.prepare("SELECT text FROM samples WHERE song_id = :song_id ORDER BY song_sample_id").unwrap();
+    let mut stmnt = db.prepare("SELECT text FROM samples WHERE song_id = :song_id").unwrap();
 
     while let Some(row) = rows.next()? {
         let song_id: u64 = row.get(0)?;
@@ -744,7 +744,7 @@ fn get_files_from_sha_hash(info: &TrackInfo, db: &Connection) -> Result<Vec<Data
 
         entries.push(DatabaseMeta { filename, samples });
     }
-
+        
     Ok(entries)
 }
 
@@ -757,7 +757,7 @@ fn get_files_from_pattern_hash<'a>(info: &TrackInfo, db: &Connection) -> Result<
 
     let pattern_hash = info.pattern_hash & 0x7FFF_FFFF_FFFF_FFFF;
 
-    let mut stmnt = db.prepare("SELECT song_id, url  FROM files WHERE pattern_hash = :hash")?;
+    let mut stmnt = db.prepare("SELECT song_id, url FROM files WHERE pattern_hash = :hash")?;
     let mut rows = stmnt.query(&[(":hash", &pattern_hash)])?;
         
     let mut stmnt = db.prepare("SELECT text FROM samples WHERE song_id = :song_id ORDER BY song_sample_id").unwrap();
