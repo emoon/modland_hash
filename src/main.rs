@@ -995,7 +995,7 @@ fn match_samples(dir: &str, db: &Connection, args: &Args) -> Result<()> {
 
         for i in top_samples {
             println!("-------------------------------------------------------------------------------");
-            println!("Original sample id: {} {}", i.original_sample_id, i.text);
+            println!("{:02} {}", i.original_sample_id, i.text);
             println!("-------------------------------------------------------------------------------");
             let mut max_len = 0;
             for m in &i.matching_samples {
@@ -1011,7 +1011,7 @@ fn match_samples(dir: &str, db: &Connection, args: &Args) -> Result<()> {
                     print!(" ");
                 }
 
-                println!("({})", m.filename);
+                println!("{}", m.filename);
             }
         }
     }
