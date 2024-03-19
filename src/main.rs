@@ -1,12 +1,12 @@
 use anyhow::{bail, Result};
 use clap::Parser;
-use indicatif::{ProgressBar, ProgressStyle, ProgressState};
+use indicatif::{ProgressBar, ProgressState, ProgressStyle};
 use rayon::prelude::*;
 use regex::Regex;
-use sha2::Digest;
-use std::sync::mpsc::{self, Receiver, Sender};
-use simple_logger::SimpleLogger;
 use rusqlite::Connection;
+use sha2::Digest;
+use simple_logger::SimpleLogger;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::{
     collections::HashMap,
     fs::File,
@@ -29,32 +29,32 @@ struct CSampleData {
     length_bytes: u32,
     // length in bytes
     length: u32,
-    // Id for the sample in the song 
+    // Id for the sample in the song
     sample_id: u32,
-	// Global volume (sample volume is multiplied by this), 0...64
-	global_vol: u16,
-	// bits per sample
+    // Global volume (sample volume is multiplied by this), 0...64
+    global_vol: u16,
+    // bits per sample
     bits_per_sample: u8,
     // if stero sample or not
     stereo: u8,
-	// Default sample panning (if pan flag is set), 0...256
-	pan: u16,
-	// Default volume, 0...256 (ignored if uFlags[SMP_NODEFAULTVOLUME] is set)
-	volume: u16,
-	// Frequency of middle-C, in Hz (for IT/S3M/MPTM)
-	c5_speed: u32,
-	// Relative note to middle c (for MOD/XM)
-	relative_tone: i8,
-	// Finetune period (for MOD/XM), -128...127, unit is 1/128th of a semitone
-	fine_tune: i8,
-	// Auto vibrato type
-	vib_type: u8,
-	// Auto vibrato sweep (i.e. how long it takes until the vibrato effect reaches its full depth)
-	vib_sweep: u8,
-	// Auto vibrato depth
-	vib_depth: u8,
-	// Auto vibrato rate (speed)
-	vib_rate: u8,
+    // Default sample panning (if pan flag is set), 0...256
+    pan: u16,
+    // Default volume, 0...256 (ignored if uFlags[SMP_NODEFAULTVOLUME] is set)
+    volume: u16,
+    // Frequency of middle-C, in Hz (for IT/S3M/MPTM)
+    c5_speed: u32,
+    // Relative note to middle c (for MOD/XM)
+    relative_tone: i8,
+    // Finetune period (for MOD/XM), -128...127, unit is 1/128th of a semitone
+    fine_tune: i8,
+    // Auto vibrato type
+    vib_type: u8,
+    // Auto vibrato sweep (i.e. how long it takes until the vibrato effect reaches its full depth)
+    vib_sweep: u8,
+    // Auto vibrato depth
+    vib_depth: u8,
+    // Auto vibrato rate (speed)
+    vib_rate: u8,
 }
 
 impl CSampleData {
@@ -202,8 +202,8 @@ struct Args {
     /// List existing duplicates in the database
     #[clap(short, long)]
     list_duplicateds_in_database: bool,
-    
-    /// Dumps all info in the database 
+
+    /// Dumps all info in the database
     #[clap(long)]
     list_database: bool,
 
@@ -276,11 +276,7 @@ impl Filters {
     }
 
     // Apply all the filters
-    fn apply_filter(
-        &self,
-        input: &[DatabaseMeta],
-        skip_level: usize,
-    ) -> Vec<DatabaseMeta> {
+    fn apply_filter(&self, input: &[DatabaseMeta], skip_level: usize) -> Vec<DatabaseMeta> {
         let mut output: Vec<DatabaseMeta> = Vec::new();
 
         for i in input {
@@ -408,7 +404,7 @@ fn get_track_info(filename: &str, dump_patterns: bool) -> TrackInfo {
 
     if !song_data.is_null() {
         let hash_id = unsafe { (*song_data).hash };
-        let samples = unsafe { (*song_data).get_samples() }; 
+        let samples = unsafe { (*song_data).get_samples() };
         track_info.pattern_hash = hash_id;
 
         for sample in samples {
@@ -454,7 +450,7 @@ fn get_db_filename() -> String {
 
 enum DbCommand {
     Insert(String), // Example command to insert a string
-    Quit,  // Example command to query a string
+    Quit,           // Example command to query a string
 }
 
 fn run_build_db_thread(filename: String, rx: Receiver<DbCommand>) {
@@ -462,14 +458,16 @@ fn run_build_db_thread(filename: String, rx: Receiver<DbCommand>) {
 
     conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
 
-    conn.execute("CREATE TABLE files (
+    conn.execute(
+        "CREATE TABLE files (
         song_id INTEGER PRIMARY KEY, 
         hash_id TEXT NOT NULL, 
         pattern_hash INTEGER, 
         url TEXT NOT NULL
         )",
         [],
-    ).unwrap();
+    )
+    .unwrap();
 
     /*
         c5_speed INTEGER,
@@ -486,7 +484,8 @@ fn run_build_db_thread(filename: String, rx: Receiver<DbCommand>) {
         vibrato_rate INTEGER,
     */
 
-    conn.execute("CREATE TABLE samples (
+    conn.execute(
+        "CREATE TABLE samples (
         hash_id TEXT, 
         song_id INTEGER, 
         song_sample_id INTEGER,
@@ -496,34 +495,44 @@ fn run_build_db_thread(filename: String, rx: Receiver<DbCommand>) {
         FOREIGN KEY (song_id) REFERENCES files(song_id)
         )",
         [],
-    ).unwrap();
+    )
+    .unwrap();
 
-    conn.execute("CREATE TABLE instruments (
+    conn.execute(
+        "CREATE TABLE instruments (
         hash_id TEXT, 
         song_id INTEGER, 
         text TEXT, 
         FOREIGN KEY (song_id) REFERENCES files(song_id)
         )",
         [],
-    ).unwrap();
+    )
+    .unwrap();
 
     conn.execute("BEGIN TRANSACTION", []).unwrap();
 
     // Listen for commands
     for command in rx {
         match command {
-            DbCommand::Insert(cmd) => { conn.execute(&cmd, [],).unwrap(); },
+            DbCommand::Insert(cmd) => {
+                conn.execute(&cmd, []).unwrap();
+            }
             DbCommand::Quit => break,
         }
     }
 
     conn.execute("COMMIT", []).unwrap();
 
-    conn.execute("CREATE INDEX hash_files ON files (hash_id)", []).unwrap();
-    conn.execute("CREATE INDEX pattern_files ON files (pattern_hash)", []).unwrap();
-    conn.execute("CREATE INDEX hash_samples ON samples (hash_id)", []).unwrap();
-    conn.execute("CREATE INDEX length_samples ON samples (length)", []).unwrap();
-    conn.execute("CREATE INDEX song_id_samples ON samples (song_id)", []).unwrap();
+    conn.execute("CREATE INDEX hash_files ON files (hash_id)", [])
+        .unwrap();
+    conn.execute("CREATE INDEX pattern_files ON files (pattern_hash)", [])
+        .unwrap();
+    conn.execute("CREATE INDEX hash_samples ON samples (hash_id)", [])
+        .unwrap();
+    conn.execute("CREATE INDEX length_samples ON samples (length)", [])
+        .unwrap();
+    conn.execute("CREATE INDEX song_id_samples ON samples (song_id)", [])
+        .unwrap();
 }
 
 fn build_database(out_filename: &str, database_path: &str, args: &Args) {
@@ -556,12 +565,12 @@ fn build_database(out_filename: &str, database_path: &str, args: &Args) {
             format!("{}", t)
         } else {
             "NULL".to_string()
-        }; 
+        };
 
         let insert = format!("INSERT INTO files (song_id, hash_id, pattern_hash, url) VALUES ({}, '{}', {}, '{}')", 
-                index, 
-                &track.sha256_hash, 
-                pattern_hash, 
+                index,
+                &track.sha256_hash,
+                pattern_hash,
                 get_url(&track.filename));
 
          tx.send(DbCommand::Insert(insert)).expect("Failed to send command");
@@ -569,9 +578,9 @@ fn build_database(out_filename: &str, database_path: &str, args: &Args) {
         for sample in &track.samples {
             let insert = format!("INSERT INTO samples (hash_id, song_id, song_sample_id, text, length_bytes, length) VALUES ({}, {}, {}, {}, {}, {})", 
                 &sample.sha256_hash,
-                index, 
-                sample.sample_id, 
-                &sample.text, 
+                index,
+                sample.sample_id,
+                &sample.text,
                 sample.length_bytes,
                 sample.length);
 
@@ -600,12 +609,29 @@ fn create_db_file(filename: &str) -> Result<File> {
     )
 }
 
-// Download and upack the database 
-fn download_db_err() -> Result<()> {
+fn create_progress_bar(len: usize) -> ProgressBar {
+    let pb = ProgressBar::new(len as _);
+    //pb.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+    pb.set_style(
+        ProgressStyle::with_template(
+            "{prefix} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})",
+        )
+        .unwrap()
+        .with_key(
+            "eta",
+            |state: &ProgressState, w: &mut dyn std::fmt::Write| {
+                write!(w, "{:.1}s", state.eta().as_secs_f64()).unwrap()
+            },
+        )
+        .progress_chars("#>-"),
+    );
+    pb
+}
+
+// Download and upack the database
+fn download_db() -> Result<ProgressBar> {
     let filename = format!("{}.7z", get_db_filename());
     let mut file = create_db_file(&filename)?;
-
-    dbg!("Dowloading to ", &filename);
 
     let resp = ureq::get(DB_REMOTE).call()?;
     let len: usize = resp.header("Content-Length").unwrap().parse()?;
@@ -613,11 +639,7 @@ fn download_db_err() -> Result<()> {
     let mut temp_buffer: [u8; 1024] = [0; 1024];
     let mut reader = resp.into_reader();
 
-    let pb = ProgressBar::new(len as _);
-    pb.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})")
-        .unwrap()
-        .with_key("eta", |state: &ProgressState, w: &mut dyn std::fmt::Write| write!(w, "{:.1}s", state.eta().as_secs_f64()).unwrap())
-        .progress_chars("#>-"));
+    let pb = create_progress_bar(len);
 
     pb.set_prefix("Downloading Database");
 
@@ -636,11 +658,10 @@ fn download_db_err() -> Result<()> {
         file.write_all(&temp_buffer[0..read_size])?;
     }
 
-
-    Ok(())
+    Ok(pb)
 }
 
-fn decompress_db() -> Result<()> {
+fn decompress_db(pb: Option<ProgressBar>) -> Result<()> {
     let filename = format!("{}.7z", get_db_filename());
 
     // Check if compressed file exists and unpack it
@@ -657,21 +678,18 @@ fn decompress_db() -> Result<()> {
         .map(|e| e.size())
         .sum();
 
-    let pb = ProgressBar::new(total_size as _);
-    pb.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})")
-        .unwrap()
-        .with_key("eta", |state: &ProgressState, w: &mut dyn std::fmt::Write| write!(w, "{:.1}s", state.eta().as_secs_f64()).unwrap())
-        .progress_chars("#>-"));
+    let pb = if let Some(pb) = pb {
+        pb.set_length(total_size as _);
+        pb
+    } else {
+        create_progress_bar(total_size as _)
+    };
 
     pb.set_prefix("Decompressing Database");
 
     let mut uncompressed_size = 0;
-    let dest = PathBuf::from(std::env::current_exe()?);
-    sz.for_each_entries(|entry, reader| {
+    sz.for_each_entries(|_entry, reader| {
         let mut buf = [0u8; 1024];
-        let path = dest.join(entry.name());
-        dbg!(&path);
-        //std::fs::create_dir_all(path.parent().unwrap())?;
         let mut file = File::create(get_db_filename()).unwrap();
         loop {
             let read_size = reader.read(&mut buf).unwrap();
@@ -692,17 +710,6 @@ fn decompress_db() -> Result<()> {
     Ok(())
 }
 
-fn download_db() {
-    match download_db_err() {
-        Err(_) => {
-            println!("Unable to download database. Download {} manually and place it next to the executable.", DB_REMOTE);
-            std::process::exit(1);
-        }
-        _ => (),
-    }
-}
-
-
 /*
     let re = Regex::new(search_string).unwrap();
     let mut count = 0;
@@ -722,29 +729,34 @@ fn download_db() {
 }
      */
 
+fn get_samples_from_song_id(db: &Connection, song_id: u64) -> Result<Vec<String>> {
+    let mut samples = Vec::new();
+
+    let mut stmnt = db.prepare("SELECT text FROM samples WHERE song_id = :song_id")?;
+    let mut rows = stmnt.query(&[(":song_id", &song_id)])?;
+
+    while let Some(row) = rows.next()? {
+        let text: String = row.get(0)?;
+        samples.push(text);
+    }
+
+    Ok(samples)
+}
+
 fn get_files_from_sha_hash(info: &TrackInfo, db: &Connection) -> Result<Vec<DatabaseMeta>> {
     let mut entries = Vec::new();
 
     let mut stmnt = db.prepare("SELECT song_id, url FROM files WHERE hash_id = :hash")?;
     let mut rows = stmnt.query(&[(":hash", &info.sha256_hash)])?;
-        
-    let mut stmnt = db.prepare("SELECT text FROM samples WHERE song_id = :song_id").unwrap();
 
     while let Some(row) = rows.next()? {
         let song_id: u64 = row.get(0)?;
         let filename: String = row.get(1)?;
-        let mut samples = Vec::new();
-
-        let mut rows = stmnt.query(&[(":song_id", &song_id)])?;
-
-        while let Some(row) = rows.next()? {
-            let text: String = row.get(0).unwrap();
-            samples.push(text);
-        }
+        let samples = get_samples_from_song_id(db, song_id)?;
 
         entries.push(DatabaseMeta { filename, samples });
     }
-        
+
     Ok(entries)
 }
 
@@ -759,20 +771,11 @@ fn get_files_from_pattern_hash<'a>(info: &TrackInfo, db: &Connection) -> Result<
 
     let mut stmnt = db.prepare("SELECT song_id, url FROM files WHERE pattern_hash = :hash")?;
     let mut rows = stmnt.query(&[(":hash", &pattern_hash)])?;
-        
-    let mut stmnt = db.prepare("SELECT text FROM samples WHERE song_id = :song_id ORDER BY song_sample_id").unwrap();
 
     while let Some(row) = rows.next()? {
         let song_id: u64 = row.get(0)?;
         let filename: String = row.get(1)?;
-        let mut samples = Vec::new();
-
-        let mut rows = stmnt.query(&[(":song_id", &song_id)])?;
-
-        while let Some(row) = rows.next()? {
-            let text: String = row.get(0).unwrap();
-            samples.push(text);
-        }
+        let samples = get_samples_from_song_id(db, song_id)?;
 
         entries.push(DatabaseMeta { filename, samples });
     }
@@ -908,12 +911,7 @@ fn match_dir_against_db(dir: &str, args: &Args, db: &Connection) -> Result<()> {
 
         let sample_names: Vec<String> = info.samples.iter().map(|s| s.text.to_owned()).collect();
 
-        print_found_entries(
-            &sample_names,
-            &found_entries,
-            args,
-            &filters.sample_search,
-        );
+        print_found_entries(&sample_names, &found_entries, args, &filters.sample_search);
 
         println!();
     }
@@ -1058,7 +1056,6 @@ fn main() -> Result<()> {
     // first we check if we have a database and if we don't we try to download it we don't
     // or if the database version doesn't match
 
-    dbg!();
     if let Some(db_path) = args.build_database.as_ref() {
         let filename = get_db_filename();
 
@@ -1073,20 +1070,15 @@ fn main() -> Result<()> {
 
     let database_path = check_for_db_file();
 
-    dbg!();
     if args.download_database || database_path.is_none() {
-        download_db();
+        let pb = download_db()?;
+        decompress_db(Some(pb))?;
+    } else {
+        decompress_db(None)?;
     }
 
-    dbg!();
-    decompress_db().unwrap();
-    dbg!();
+    let conn = Connection::open(&get_db_filename())?;
 
-    dbg!();
-    let conn = Connection::open(&get_db_filename()).unwrap();
-    dbg!();
-
-    
     /*
 
     // Process duplicates in the database
@@ -1104,4 +1096,3 @@ fn main() -> Result<()> {
 
     match_dir_against_db(&args.match_dir, &args, &conn)
 }
-
