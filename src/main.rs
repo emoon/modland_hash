@@ -919,18 +919,23 @@ struct MachingSampleData {
     sample_id: i64,
 }
 
+struct TopSampleData {
+    original_sample_id: i64,
+    text: String,
+    matching_samples: Vec<MachingSampleData>,
+}
+
 fn match_samples(dir: &str, db: &Connection, args: &Args) -> Result<()> {
     let files = get_files(dir, args.recursive);
 
     for filename in files {
         let info = get_track_info(&filename, args.dump_patterns);
-        let mut matched_samples = Vec::new();
+        let mut top_samples = Vec::new();
 
         if info.samples.is_empty() {
             continue;
         }
         
-        let mut last_line_with_text = 0;
         let mut max_len = 0;
         for line in &info.samples {
             max_len = std::cmp::max(line.text.chars().count(), max_len);
@@ -967,7 +972,7 @@ fn match_samples(dir: &str, db: &Connection, args: &Args) -> Result<()> {
                 });
             }
 
-            print!("{:02} {}", sample.sample_id, sample.text);
+            print!("{:02} {}", sample.sample_id, &sample.text[1..sample.text.len() - 1]);
 
             for _ in sample.text.chars().count()..max_len - 1 {
                 print!(" ");
@@ -976,18 +981,39 @@ fn match_samples(dir: &str, db: &Connection, args: &Args) -> Result<()> {
             println!("({} duplicates) length {}", matching_data.len(), sample.length);
 
             if !matching_data.is_empty() {
-                matched_samples.push(matching_data);
+                matching_data.sort_by(|a, b| b.text.cmp(&a.text));
+
+                let t = TopSampleData {
+                    original_sample_id: sample.sample_id as _,
+                    text: sample.text.to_owned(),
+                    matching_samples: matching_data,
+                };
+
+                top_samples.push(t);
             }
         }
 
-        /*
-        for matching in matched_samples {
-            for m in matching {
-                println!("Found match {} (sample_id: {})", m.filename, m.sample_id);
-                println!("Sample text: {}", m.text);
+        for i in top_samples {
+            println!("-------------------------------------------------------------------------------");
+            println!("Original sample id: {} {}", i.original_sample_id, i.text);
+            println!("-------------------------------------------------------------------------------");
+            let mut max_len = 0;
+            for m in &i.matching_samples {
+                max_len = std::cmp::max(m.text.chars().count(), max_len);
+            }
+
+            max_len += 2;
+
+            for m in &i.matching_samples {
+                print!("{:02} {}", m.sample_id, m.text);
+
+                for _ in m.text.chars().count()..max_len - 1 {
+                    print!(" ");
+                }
+
+                println!("({})", m.filename);
             }
         }
-        */
     }
 
     Ok(())
@@ -1046,7 +1072,7 @@ fn get_dupes(db: &Connection, args: &Args, get_songs_query: &str, get_by_id: &st
             }
         }
 
-        let mut vals = filters.apply_filter(&vals, 2);
+        let mut vals = filters.apply_filter(&vals, dupe_limit + 1);
 
         if !vals.is_empty() {
             vals.sort_by(|a, b| a.filename.cmp(&b.filename));
