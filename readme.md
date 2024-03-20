@@ -46,19 +46,52 @@ Commandline options are as following:
             Builds a new database given a local directory
 ```
 
-
 ## Downloading
 
 Builds of the tool can be found here https://github.com/emoon/modland_hash/releases (Windows and macOS) 
 
 ## Examples
 
-### Find all samples in the database with a length of 8700 and matching the text "ahhvox"
+Find all samples in the database with a length of 8700 and matching the text "ahhvox"
 
 ```
 modland_hash --find-samples-with-length-bytes 8700 --include-sample-name '.*ahhvox.*'`
+```
+
+To match the local files just run the tool without any options
 
 ```
+modland_hash
+```
+
+To match the local files but only include .mod and .xm files 
+
+```
+modland_hash --include-file-extensions "mod,xm"
+```
+
+To match the local files but only include .mod and .xm files and only include duplicates that match the "/incoming" path
+
+```
+modland_hash --include-file-extensions "mod,xm" --include-paths "/incoming"
+```
+
+To match the local files but only include .mod and .xm files and only include duplicates that match the "/incoming" path and only include duplicates that match the ".*north.*" regexp pattern in the filename
+
+```
+modland_hash --include-file-extensions "mod,xm" --include-paths "/incoming" --search-filename ".*north.*"
+```
+
+Match the local files but match the samples in the files instead of the files themselves
+
+```
+modland_hash --match-samples
+```
+
+## Database
+
+The database is a SQLite database that can be downloaded from here https://www.dropbox.com/scl/fi/gtk2yri6iizlaeb6b0j0j/modland_hash.db.7z?rlkey=axcrqv54eg2c1yju6vf043ly1&dl=1
+It's updated every 24 hours and contains all the files on ftp.modland.com. If the modland_hash tool doesn't fit your needs, you can use the database directly in a tool such as https://sqliteonline.com or write your own tool to query the database. 
 
 ## Compiling
 
