@@ -21,6 +21,9 @@
 OPENMPT_NAMESPACE_BEGIN
 
 
+#if !defined(MPT_WITH_ANCIENT)
+
+
 #ifdef MPT_ALL_LOGGING
 #define MMCMP_LOG
 #endif
@@ -58,7 +61,7 @@ struct XPK_BufferBounds
 
 static int32 bfextu(std::size_t p, int32 bo, int32 bc, XPK_BufferBounds &bufs)
 {
-	int32 r;
+	uint32 r;
 
 	p += bo / 8;
 	r = bufs.SrcRead(p); p++;
@@ -75,7 +78,7 @@ static int32 bfextu(std::size_t p, int32 bo, int32 bc, XPK_BufferBounds &bufs)
 
 static int32 bfexts(std::size_t p, int32 bo, int32 bc, XPK_BufferBounds &bufs)
 {
-	int32 r;
+	uint32 r;
 
 	p += bo / 8;
 	r = bufs.SrcRead(p); p++;
@@ -84,9 +87,7 @@ static int32 bfexts(std::size_t p, int32 bo, int32 bc, XPK_BufferBounds &bufs)
 	r <<= 8;
 	r |= bufs.SrcRead(p);
 	r <<= (bo % 8) + 8;
-	r >>= 32 - bc;
-
-	return r;
+	return mpt::rshift_signed(static_cast<int32>(r), 32 - bc);
 }
 
 
@@ -97,10 +98,12 @@ static uint8 XPK_ReadTable(int32 index)
 	};
 	if(index < 0) throw XPK_error();
 	if(static_cast<std::size_t>(index) >= std::size(xpk_table)) throw XPK_error();
+	// cppcheck false-positive
+	// cppcheck-suppress arrayIndexOutOfBoundsCond
 	return xpk_table[index];
 }
 
-static bool XPK_DoUnpack(const uint8 *src_, uint32 srcLen, std::vector<char> &unpackedData, int32 len)
+static bool XPK_DoUnpack(const mpt::const_byte_span src_, std::vector<char> &unpackedData, int32 len)
 {
 	if(len <= 0) return false;
 	int32 d0,d1,d2,d3,d4,d5,d6,a2,a5;
@@ -109,11 +112,11 @@ static bool XPK_DoUnpack(const uint8 *src_, uint32 srcLen, std::vector<char> &un
 	std::size_t src;
 	std::size_t phist = 0;
 
-	unpackedData.reserve(std::min(static_cast<uint32>(len), std::min(srcLen, uint32_max / 20u) * 20u));
+	unpackedData.reserve(std::min(static_cast<uint32>(len), std::min(mpt::saturate_cast<uint32>(src_.size()), uint32_max / 20u) * 20u));
 
 	XPK_BufferBounds bufs;
-	bufs.pSrcBeg = src_;
-	bufs.SrcSize = srcLen;
+	bufs.pSrcBeg = mpt::byte_cast<const uint8*>(src_.data());
+	bufs.SrcSize = src_.size();
 
 	src = 0;
 	c = src;
@@ -141,7 +144,7 @@ static bool XPK_DoUnpack(const uint8 *src_, uint32 srcLen, std::vector<char> &un
 		if (type != 1)
 		{
 			#ifdef MMCMP_LOG
-				MPT_LOG(LogDebug, "XPK", mpt::format(U_("Invalid XPK type! (%1 bytes left)"))(len));
+				MPT_LOG_GLOBAL(LogDebug, "XPK", MPT_UFORMAT("Invalid XPK type! ({} bytes left)")(len));
 			#endif
 			break;
 		}
@@ -399,15 +402,16 @@ bool UnpackXPK(std::vector<ContainerItem> &containerItems, FileReader &file, Con
 	std::vector<char> & unpackedData = *(containerItems.back().data_cache);
 
 	#ifdef MMCMP_LOG
-		MPT_LOG(LogDebug, "XPK", mpt::uformat(U_("XPK detected (SrcLen=%1 DstLen=%2) filesize=%3"))(static_cast<uint32>(header.SrcLen), static_cast<uint32>(header.DstLen), file.GetLength()));
+		MPT_LOG_GLOBAL(LogDebug, "XPK", MPT_UFORMAT("XPK detected (SrcLen={} DstLen={}) filesize={}")(static_cast<uint32>(header.SrcLen), static_cast<uint32>(header.DstLen), file.GetLength()));
 	#endif
 	bool result = false;
 	try
 	{
-		result = XPK_DoUnpack(file.GetRawData<uint8>(), header.SrcLen - (sizeof(XPKFILEHEADER) - 8), unpackedData, header.DstLen);
-	} MPT_EXCEPTION_CATCH_OUT_OF_MEMORY(e)
+		FileReader::PinnedView compressedData = file.GetPinnedView(header.SrcLen - (sizeof(XPKFILEHEADER) - 8));
+		result = XPK_DoUnpack(compressedData.span(), unpackedData, header.DstLen);
+	} catch(mpt::out_of_memory e)
 	{
-		MPT_EXCEPTION_DELETE_OUT_OF_MEMORY(e);
+		mpt::delete_out_of_memory(e);
 		return false;
 	} catch(const XPK_error &)
 	{
@@ -420,6 +424,9 @@ bool UnpackXPK(std::vector<ContainerItem> &containerItems, FileReader &file, Con
 	}
 	return result;
 }
+
+
+#endif // !MPT_WITH_ANCIENT
 
 
 OPENMPT_NAMESPACE_END

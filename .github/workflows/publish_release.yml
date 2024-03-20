@@ -15,8 +15,6 @@ jobs:
     - name: Build code & Generate build
       shell: cmd
       run: |
-        git describe --tags --abbrev=0 > version.txt
-        set /P MODLAND_HASH_VERSION=< version.txt
         cargo build --release && copy target\release\modland_hash.exe modland_hash.exe && tar.exe -a -c -f modland_hash.zip modland_hash.exe
     - name: Upload binaries to release
       uses: svenstaro/upload-release-action@v2
@@ -26,3 +24,27 @@ jobs:
         asset_name: modland_hash_$tag.zip
         tag: ${{ github.ref }}
         overwrite: true
+
+  publish_mac:
+    name: Publish binaries
+    runs-on: macos-14
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: Build x86_64-apple-darwin 
+      run: rustup target add x86_64-apple-darwin && cargo build --release --target=x86_64-apple-darwin
+    - name: Build ARM 
+      run: cargo build --release
+    - name: Generate universal binary 
+      run: lipo -create target/release/modland_hash target/x86_64-apple-darwin/release/modland_hash -output modland_hash 
+    - name: Package universal binary 
+      run: tar -a -c -f modland_hash_macos.zip modland_hash
+    - name: Upload binaries to release
+      uses: svenstaro/upload-release-action@v2
+      with:
+        repo_token: ${{ secrets.GITHUB_TOKEN }}
+        file: modland_hash_macos.zip
+        asset_name: modland_hash_macos_$tag.zip
+        tag: ${{ github.ref }}
+        overwrite: true
+

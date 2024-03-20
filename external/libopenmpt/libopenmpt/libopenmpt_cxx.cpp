@@ -7,7 +7,11 @@
  * The OpenMPT source code is released under the BSD license. Read LICENSE for more details.
  */
 
-#include "BuildSettings.h"
+#include "openmpt/all/BuildSettings.hpp"
+
+#if defined(__MINGW32__) && !defined(__MINGW64__)
+#include <sys/types.h>
+#endif
 
 #include "libopenmpt_internal.h"
 #include "libopenmpt.hpp"
@@ -114,8 +118,6 @@ std::string get( const std::string & key ) {
 } // namespace string
 
 } // namespace openmpt
-
-#ifndef NO_LIBOPENMPT_CXX
 
 namespace openmpt {
 
@@ -314,6 +316,9 @@ std::int32_t module::get_current_speed() const {
 std::int32_t module::get_current_tempo() const {
 	return impl->get_current_tempo();
 }
+double module::get_current_tempo2() const {
+	return impl->get_current_tempo2();
+}
 std::int32_t module::get_current_order() const {
 	return impl->get_current_order();
 }
@@ -386,6 +391,10 @@ std::int32_t module::get_order_pattern( std::int32_t order ) const {
 }
 std::int32_t module::get_pattern_num_rows( std::int32_t pattern ) const {
 	return impl->get_pattern_num_rows( pattern );
+}
+
+OpenMPT::CSoundFile* module::get_snd_file() {
+    return impl->get_snd_file();
 }
 
 std::uint8_t module::get_pattern_row_channel_command( std::int32_t pattern, std::int32_t row, std::int32_t channel, int command ) const {
@@ -500,5 +509,3 @@ void * module_ext::get_interface( const std::string & interface_id ) {
 }
 
 } // namespace openmpt
-
-#endif // NO_LIBOPENMPT_CXX
