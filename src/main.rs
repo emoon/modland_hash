@@ -176,6 +176,14 @@ struct Args {
     #[clap(long)]
     match_samples: bool,
 
+    /// Search the database for samples matching a certain length (length is in samples)
+    #[clap(long)]
+    find_samples_with_length: Option<usize>,
+
+    /// Search the database for samples matching a certain length (length is in bytes)
+    #[clap(long)]
+    find_samples_with_length_bytes: Option<usize>,
+
     /// Skips files with these extensions if any duplicates are found. Example: --skip-file-extensions "mdx,pdx" will skip all duplicates that contain .mdx and .pdx files (case-insensitive)
     #[clap(long, default_value = "")]
     exclude_file_extensions: String,
@@ -916,6 +924,7 @@ fn match_dir_against_db(dir: &str, args: &Args, db: &Connection) -> Result<()> {
 struct MachingSampleData {
     filename: String,
     text: String,
+    text_lower: String,
     sample_id: i64,
 }
 
@@ -946,30 +955,30 @@ fn match_samples(dir: &str, db: &Connection, args: &Args) -> Result<()> {
         println!("Matching {} for duplicated samples", filename);
 
         for sample in &info.samples {
-            let statement = format!("
-                SELECT song_sample_id, text, files.url 
-                FROM samples JOIN files ON samples.song_id = files.song_id WHERE samples.hash_id = {}",
-                sample.sha256_hash);
-
-            let mut stmnt = db.prepare(&statement)?;
-
-            //println!("SELECT text FROM samples WHERE hash_id = {}", sample.sha256_hash);
-            //dbg!(&sample.text, &sample.sha256_hash);
-
-            //let mut rows = stmnt.query(params![&sample.sha256_hash])?;
-            let mut rows = stmnt.query([])?;
             let mut matching_data = Vec::new();
 
-            while let Some(row) = rows.next()? {
-                let sample_id: i64 = row.get(0)?;
-                let text: String = row.get(1)?;
-                let url: String = row.get(2)?;
+            if sample.length_bytes > 0 {
+                let statement = format!("
+                    SELECT song_sample_id, text, files.url 
+                    FROM samples JOIN files ON samples.song_id = files.song_id WHERE samples.hash_id = {}",
+                    sample.sha256_hash);
 
-                matching_data.push(MachingSampleData {
-                    filename: url,
-                    text,
-                    sample_id,
-                });
+                let mut stmnt = db.prepare(&statement)?;
+                let mut rows = stmnt.query([])?;
+
+                while let Some(row) = rows.next()? {
+                    let sample_id: i64 = row.get(0)?;
+                    let text: String = row.get(1)?;
+                    let url: String = row.get(2)?;
+                    let text_lower = text.to_ascii_lowercase();
+
+                    matching_data.push(MachingSampleData {
+                        filename: url,
+                        text,
+                        text_lower,
+                        sample_id,
+                    });
+                }
             }
 
             print!("{:02} {}", sample.sample_id, &sample.text[1..sample.text.len() - 1]);
@@ -978,10 +987,14 @@ fn match_samples(dir: &str, db: &Connection, args: &Args) -> Result<()> {
                 print!(" ");
             }
 
-            println!("({} duplicates) length {}", matching_data.len(), sample.length);
+            if !matching_data.is_empty() {
+                println!("({} duplicates) length {}", matching_data.len(), sample.length);
+            } else {
+                println!();
+            }
 
             if !matching_data.is_empty() {
-                matching_data.sort_by(|a, b| b.text.cmp(&a.text));
+                matching_data.sort_by(|a, b| b.text_lower.cmp(&a.text_lower));
 
                 let t = TopSampleData {
                     original_sample_id: sample.sample_id as _,
@@ -1151,6 +1164,73 @@ fn print_db(db: &Connection, args: &Args) -> Result<()> {
     Ok(())
 }
 
+fn print_sample_rows(rows: &mut rusqlite::Rows) -> Result<()> {
+    let mut data = Vec::with_capacity(1024);
+    let mut max_len = 0;
+
+    while let Some(row) = rows.next()? {
+        let sample_id: i64 = row.get(0)?;
+        let text: String = row.get(1)?;
+        let url: String = row.get(2)?;
+
+        max_len = std::cmp::max(text.chars().count(), max_len);
+        let text_lower = text.to_ascii_lowercase();
+
+        data.push(MachingSampleData {
+            filename: url,
+            text,
+            text_lower,
+            sample_id,
+        });
+    }
+
+    if data.is_empty() {
+        println!("No matches found!");
+        return Ok(());
+    }
+
+    println!("Found {} samples matching", data.len());
+
+    data.sort_by(|a, b| b.text_lower.cmp(&a.text_lower));
+
+    for d in data {
+        print!("{:03} {}", d.sample_id, d.text);
+
+        for _ in d.text.chars().count()..max_len {
+            print!(" ");
+        }
+
+        println!("{}", d.filename);
+    }
+
+    Ok(())
+}
+
+fn match_db_with_sample_length(db: &Connection, length: usize) -> Result<()> {
+    let statement = format!("
+        SELECT song_sample_id, text, files.url 
+        FROM samples JOIN files ON samples.song_id = files.song_id WHERE samples.length = {}",
+        length);
+
+    let mut stmnt = db.prepare(&statement)?;
+    let mut rows = stmnt.query([])?;
+
+    print_sample_rows(&mut rows)
+}
+
+fn match_db_with_sample_length_bytes(db: &Connection, length: usize) -> Result<()> {
+    let statement = format!("
+        SELECT song_sample_id, text, files.url 
+        FROM samples JOIN files ON samples.song_id = files.song_id WHERE samples.length_bytes = {}",
+        length);
+
+    let mut stmnt = db.prepare(&statement)?;
+    let mut rows = stmnt.query([])?;
+
+    print_sample_rows(&mut rows)
+}
+
+
 fn main() -> Result<()> {
     let args = Args::parse();
     SimpleLogger::new()
@@ -1183,6 +1263,13 @@ fn main() -> Result<()> {
 
     let conn = Connection::open(get_db_filename())?;
 
+    if let Some(len) = args.find_samples_with_length {
+        return match_db_with_sample_length(&conn, len);
+    }
+
+    if let Some(len) = args.find_samples_with_length_bytes {
+        return match_db_with_sample_length_bytes(&conn, len);
+    }
 
     // Process duplicates in the database
     if args.list_duplicates_in_database {
