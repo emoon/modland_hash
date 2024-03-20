@@ -52,12 +52,6 @@ Builds of the tool can be found here https://github.com/emoon/modland_hash/relea
 
 ## Examples
 
-Find all samples in the database with a length of 8700 and matching the text "ahhvox"
-
-```
-modland_hash --find-samples-with-length-bytes 8700 --include-sample-name '.*ahhvox.*'`
-```
-
 To match the local files just run the tool without any options
 
 ```
@@ -86,6 +80,24 @@ Match the local files but match the samples in the files instead of the files th
 
 ```
 modland_hash --match-samples
+```
+
+List all duplicates in the database
+
+```
+modland_hash --list-duplicates-in-database
+```
+
+Dump all information in the database and only include songs with the sample name "ripped" in them
+
+```
+modland_hash --list-database --include-sample-name ".*ripped.*"
+```
+
+Find all samples in the database with a length of 8700 and matching the text "ahhvox"
+
+```
+modland_hash --find-samples-with-length-bytes 8700 --include-sample-name '.*ahhvox.*'`
 ```
 
 ## Database
