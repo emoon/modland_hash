@@ -200,7 +200,7 @@ struct Args {
     #[clap(long, default_value = "")]
     include_paths: String,
 
-    /// Includes matches only if one of the duplicates matches the specified regexp pattern for sample names. Example: --include_sample_name ".*ripped.*" will include duplicates where one of the tracks' sample names contains "ripped"
+    /// Includes matches only if one of the duplicates matches the specified regexp pattern for sample names. Example: --include-sample-name ".*ripped.*" will include duplicates where one of the tracks' sample names contains "ripped"
     #[clap(long, default_value = "")]
     include_sample_name: String,
 
@@ -378,7 +378,7 @@ fn get_files(path: &str, recurse: bool) -> Vec<String> {
             let metadata = file.metadata().unwrap();
 
             if let Some(filename) = file.path().to_str() {
-                if metadata.is_file() && !filename.ends_with(".listing") {
+                if metadata.is_file() && !filename.ends_with(".listing") && !filename.contains("modland_hash") {
                     pb.set_message(filename.to_owned());
                     return Some(filename.to_owned());
                 }
@@ -1164,14 +1164,26 @@ fn print_db(db: &Connection, args: &Args) -> Result<()> {
     Ok(())
 }
 
-fn print_sample_rows(rows: &mut rusqlite::Rows) -> Result<()> {
+fn print_sample_rows(rows: &mut rusqlite::Rows, args: &Args) -> Result<()> {
     let mut data = Vec::with_capacity(1024);
     let mut max_len = 0;
+
+    let sample_search = if !args.include_sample_name.is_empty() {
+        Some(Regex::new(&args.include_sample_name.to_ascii_lowercase()).unwrap())
+    } else {
+        None
+    };
 
     while let Some(row) = rows.next()? {
         let sample_id: i64 = row.get(0)?;
         let text: String = row.get(1)?;
         let url: String = row.get(2)?;
+
+        if let Some(re) = sample_search.as_ref() {
+            if !re.is_match(&text.to_ascii_lowercase()) {
+                continue;
+            }
+        }
 
         max_len = std::cmp::max(text.chars().count(), max_len);
         let text_lower = text.to_ascii_lowercase();
@@ -1206,7 +1218,7 @@ fn print_sample_rows(rows: &mut rusqlite::Rows) -> Result<()> {
     Ok(())
 }
 
-fn match_db_with_sample_length(db: &Connection, length: usize) -> Result<()> {
+fn match_db_with_sample_length(db: &Connection, args: &Args, length: usize) -> Result<()> {
     let statement = format!("
         SELECT song_sample_id, text, files.url 
         FROM samples JOIN files ON samples.song_id = files.song_id WHERE samples.length = {}",
@@ -1215,10 +1227,10 @@ fn match_db_with_sample_length(db: &Connection, length: usize) -> Result<()> {
     let mut stmnt = db.prepare(&statement)?;
     let mut rows = stmnt.query([])?;
 
-    print_sample_rows(&mut rows)
+    print_sample_rows(&mut rows, args)
 }
 
-fn match_db_with_sample_length_bytes(db: &Connection, length: usize) -> Result<()> {
+fn match_db_with_sample_length_bytes(db: &Connection, args: &Args, length: usize) -> Result<()> {
     let statement = format!("
         SELECT song_sample_id, text, files.url 
         FROM samples JOIN files ON samples.song_id = files.song_id WHERE samples.length_bytes = {}",
@@ -1227,7 +1239,7 @@ fn match_db_with_sample_length_bytes(db: &Connection, length: usize) -> Result<(
     let mut stmnt = db.prepare(&statement)?;
     let mut rows = stmnt.query([])?;
 
-    print_sample_rows(&mut rows)
+    print_sample_rows(&mut rows, args)
 }
 
 
@@ -1264,11 +1276,11 @@ fn main() -> Result<()> {
     let conn = Connection::open(get_db_filename())?;
 
     if let Some(len) = args.find_samples_with_length {
-        return match_db_with_sample_length(&conn, len);
+        return match_db_with_sample_length(&conn, &args, len);
     }
 
     if let Some(len) = args.find_samples_with_length_bytes {
-        return match_db_with_sample_length_bytes(&conn, len);
+        return match_db_with_sample_length_bytes(&conn, &args, len);
     }
 
     // Process duplicates in the database

@@ -4,70 +4,61 @@ modland_hash is a tool for [ftp.modland.com](https://ftp.modland.com) It's used 
 The most basic use case is to run the tool and it will match the local files against the modland database and see if the files already exists on modland.
 Commandline options are as following:
 ```
-   -b, --build-database <BUILD_DATABASE>
+  -b, --build-database <BUILD_DATABASE>
+          Builds a new database from a given local directory
+  -d, --download-database
+          Downloads the remote database (automatically performed if it doesn't exist)
+  -m, --match-dir <MATCH_DIR>
+          Directory to search against the database. If not specified, the current directory will be used [default: .]
+  -r, --recursive
+          Performs recursive scanning (includes sub-directories) when using --match-dir and --build-database
+      --match-samples
+          Instead of matching on hash or pattern hash match the samples in the files
+      --find-samples-with-length <FIND_SAMPLES_WITH_LENGTH>
+          Search the database for samples matching a certain length (length is in samples)
+      --find-samples-with-length-bytes <FIND_SAMPLES_WITH_LENGTH_BYTES>
+          Search the database for samples matching a certain length (length is in bytes)
+      --exclude-file-extensions <EXCLUDE_FILE_EXTENSIONS>
+          Skips files with these extensions if any duplicates are found. Example: --skip-file-extensions "mdx,pdx" will skip all duplicates that contain .mdx and .pdx files (case-insensitive) [default: ]
+      --exclude-paths <EXCLUDE_PATHS>
+          Skips duplicates that match these paths. Example: --exclude-paths "/pub/favourites" will exclude results where "/pub/favourites" is present [default: ]
+  -i, --include-file-extensions <INCLUDE_FILE_EXTENSIONS>
+          Includes only duplicates with these file extensions; other files will be skipped. Example: --include-file-extensions "mod,xm" will include only matches for .mod and .xm files [default: ]
+      --include-paths <INCLUDE_PATHS>
+          Includes matches only if duplicates match these file paths. Example: --include-paths "/incoming" will show results only when at least one file matches "/incoming" [default: ]
+      --include-sample-name <INCLUDE_SAMPLE_NAME>
+          Includes matches only if one of the duplicates matches the specified regexp pattern for sample names. Example: --include_sample_name ".*ripped.*" will include duplicates where one of the tracks' sample names contains "ripped" [default: ]
+      --search-filename <SEARCH_FILENAME>
+          Displays duplicate results only if one of the entries includes a matching filename. Example: --search-filename ".*north.*" will include results only if one of the entries has "north" in it (case-insensitive) [default: ]
+  -p, --print-sample-names
+          Enables printing of sample names
+  -l, --list-duplicates-in-database
+          Lists existing duplicates in the database
+      --list-database
+          Dumps all information in the database
+      --dump-patterns
+          Primarily a debug option to allow dumping of pattern data when building the database and matching entries
+  -h, --help
+          Print help
+  -V, --version
+          Print version
+  -b, --build-database <BUILD_DATABASE>
             Builds a new database given a local directory
-
-    -d, --download-database
-            Download the remote database (done automaticlly if it doesn't exist)
-
-        --dump-patterns
-            Mostly a debug option to allow dumping pattern data when both building database and
-            matching entries
-
-        --exclude-file-extensions <EXCLUDE_FILE_EXTENSIONS>
-            If any duplicates includes these file extensions, they will be skipped. Example: --skip-
-            file-extensions "mdx,pdx" will skip all dupes containing .mdx and .pdx files (ignores
-            case) [default: ]
-
-        --exclude-paths <EXCLUDE_PATHS>
-            If any duplicate match these paths, they will be skipped. Example: --exclude-paths
-            "/pub/favourites" will only show show results where "/pub/favourites" isn't present
-            [default: ]
-
-    -h, --help
-            Print help information
-
-    -i, --include-file-extensions <INCLUDE_FILE_EXTENSIONS>
-            Only include If any duplicates includes these file extensions, other files will be
-            skipped. Example: --include-file-extensions "mod,xm" will only show matches for .mod and
-            .xm files [default: ]
-
-        --include-paths <INCLUDE_PATHS>
-            Only include match if any duplicates maches these/this file path(s). Example: --include-
-            paths "/incoming" will only show results when at least one file matches "/incoming"
-            [default: ]
-
-        --include-sample-name <INCLUDE_SAMPLE_NAME>
-            Only include match if one of the duplicates matches the regexp pattern. Example:
-            --include_sample_name ".*ripped.*" will only show duplicates where one of the tracks
-            includes sample name(s) include "ripped" [default: ]
-
-    -l, --list-duplicateds-in-database
-            List existing duplicates in the database
-
-    -m, --match-dir <MATCH_DIR>
-            Directory to search against the database. If not specificed the current directory will
-            be used [default: .]
-
-    -p, --print-sample-names
-            Makes it possible to print sample names
-
-    -r, --recursive
-            Do recurseive scanning (include sub-directories) when using --match-dir and --build-
-            database
-
-        --search-filename <SEARCH_FILENAME>
-            Only display duplicate results if one of the hits include the maching filename. Example
-            --search-filename ".*north.*" will only include dupe resutls if one of the entries has
-            .*north.* in it (case-insensitive) [default: ]
-
-    -V, --version
-            Print version information
 ```
+
 
 ## Downloading
 
-Builds of the tool can be found here https://github.com/emoon/modland_hash/releases (currently Windows only)
+Builds of the tool can be found here https://github.com/emoon/modland_hash/releases (Windows and macOS) 
+
+## Examples
+
+### Find all samples in the database with a length of 8700 and matching the text "ahhvox"
+
+```
+modland_hash --find-samples-with-length-bytes 8700 --include-sample-name '.*ahhvox.*'`
+
+```
 
 ## Compiling
 
