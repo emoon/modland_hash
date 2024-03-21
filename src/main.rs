@@ -308,7 +308,7 @@ impl Filters {
             let mut found_filename = false;
 
             for file in &output {
-                if !file.samples.is_empty() && re.is_match(&file.filename.to_ascii_lowercase()) {
+                if re.is_match(&file.filename.to_ascii_lowercase()) {
                     found_filename = true;
                     break;
                 }
@@ -990,7 +990,7 @@ fn match_samples(dir: &str, db: &Connection, args: &Args) -> Result<()> {
             if !matching_data.is_empty() {
                 println!("({} duplicates) length {}", matching_data.len(), sample.length);
             } else {
-                println!();
+                println!("length {}", sample.length);
             }
 
             if !matching_data.is_empty() {
