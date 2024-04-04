@@ -390,7 +390,6 @@ fn get_files(path: &str, recurse: bool) -> Vec<String> {
 }
 
 fn get_url(filename: &str) -> String {
-    let filename = filename.replace('\'', "''");
     let filename = filename.replace(' ', "%20");
     format!("https://ftp.modland.com{}", filename)
 }
