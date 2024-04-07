@@ -553,7 +553,7 @@ dependencies = [
 
 [[package]]
 name = "modland_hash"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "cc",

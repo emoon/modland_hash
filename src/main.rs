@@ -263,10 +263,10 @@ impl Filters {
         };
 
         Filters {
-            include_paths: Self::init_filter(&args.include_paths, ""),
-            include_file_extensions: Self::init_filter(&args.include_file_extensions, "."),
-            exclude_paths: Self::init_filter(&args.exclude_paths, ""),
-            exclude_file_extensions: Self::init_filter(&args.exclude_file_extensions, "."),
+            include_paths: Self::init_filter(&args.include_paths.to_ascii_lowercase(), ""),
+            include_file_extensions: Self::init_filter(&args.include_file_extensions.to_ascii_lowercase(), "."),
+            exclude_paths: Self::init_filter(&args.exclude_paths.to_ascii_lowercase(), ""),
+            exclude_file_extensions: Self::init_filter(&args.exclude_file_extensions.to_ascii_lowercase(), "."),
             sample_search,
             search_filename,
         }
@@ -293,12 +293,12 @@ impl Filters {
         let mut output: Vec<DatabaseMeta> = Vec::new();
 
         for i in input {
-            let filename = &i.filename;
+            let filename = i.filename.to_ascii_lowercase();
 
-            if !Self::starts_with(filename, &self.exclude_paths, false) 
-                && !Self::ends_with(filename, &self.exclude_file_extensions, false)
-                && Self::starts_with(filename, &self.include_paths, true)
-                && Self::ends_with(filename, &self.include_file_extensions, true) 
+            if !Self::starts_with(&filename, &self.exclude_paths, false) 
+                && !Self::ends_with(&filename, &self.exclude_file_extensions, false)
+                && Self::starts_with(&filename, &self.include_paths, true)
+                && Self::ends_with(&filename, &self.include_file_extensions, true) 
             {
                 output.push(i.clone());
             }

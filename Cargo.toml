@@ -1,6 +1,6 @@
 [package]
 name = "modland_hash"
-version = "0.3.3"
+version = "0.3.4"
 authors = ["Daniel Collin <daniel@collin.com>"]
 edition = "2021"
 Build = "build.rs"
