@@ -8,7 +8,7 @@ use sha2::Digest;
 use simple_logger::SimpleLogger;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::File,
     hash::{Hash, Hasher},
     io::{Read, Write},
@@ -1050,6 +1050,8 @@ fn get_dupes(db: &Connection, args: &Args, get_songs_query: &str, get_by_id: &st
     let mut rows = stmnt.query([])?;
 
     let mut stmnt = db.prepare(get_by_id)?;
+    let mut hash_id_lookup_string = HashSet::new();
+    let mut hash_id_lookup_int = HashSet::new();
 
     while let Some(row) = rows.next()? {
         let v = row.get_ref(0)?;
@@ -1058,8 +1060,29 @@ fn get_dupes(db: &Connection, args: &Args, get_songs_query: &str, get_by_id: &st
 
         let mut song_rows = match v {
             ValueRef::Null => continue,
-            ValueRef::Integer(v) => stmnt.query(params![v])?,
-            ValueRef::Text(v) => stmnt.query(params![std::str::from_utf8(v)?])?,
+            ValueRef::Integer(v) => {
+                let v = v as u64;
+                if let Some(_v) = hash_id_lookup_int.get(&v) {
+                    continue;
+                } else {
+                    hash_id_lookup_int.insert(v);
+                }
+            
+                stmnt.query(params![v])?
+            }
+
+            ValueRef::Text(v) => {
+                let v = std::str::from_utf8(v)?.to_owned();
+
+                if let Some(_v) = hash_id_lookup_string.get(&v) {
+                    continue;
+                } else {
+                    hash_id_lookup_string.insert(v.clone());
+                }
+            
+                stmnt.query(params![v])?
+            }
+
             _ => panic!(),
         };
         
