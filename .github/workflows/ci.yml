@@ -18,7 +18,27 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v2
+
+    - name: Set up Rust on Windows
+      if: matrix.os == 'windows-latest'
+      uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: 1.75.0
+        target: x86_64-pc-windows-msvc
+
+    - name: Set up Rust on other OS
+      if: matrix.os != 'windows-latest'
+      uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: stable
+
+    - name: Show version
+      run: cargo --version
+
     - name: Build
       run: cargo build --verbose
+
     - name: Run tests
       run: cargo test --verbose
