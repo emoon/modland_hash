@@ -12,6 +12,11 @@ jobs:
 
     steps:
     - uses: actions/checkout@v2
+    - name: Set up Rust 1.75 on Windows
+      run: |
+        rustup toolchain install 1.75.0
+        rustup default 1.75.0
+        rustup target add x86_64-pc-windows-msvc
     - name: Build code & Generate build
       shell: cmd
       run: |
