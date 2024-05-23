@@ -18,22 +18,14 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v2
-
-    - name: Set up Rust on Windows
+    
+    - name: Set up Rust 1.75 on Windows
       if: matrix.os == 'windows-latest'
-      uses: actions-rs/toolchain@v1
-      with:
-        profile: minimal
-        toolchain: 1.75.0
-        target: x86_64-pc-windows-msvc
-
-    - name: Set up Rust on other OS
-      if: matrix.os != 'windows-latest'
-      uses: actions-rs/toolchain@v1
-      with:
-        profile: minimal
-        toolchain: stable
-
+      run: |
+        rustup toolchain install 1.75.0
+        rustup default 1.75.0
+        rustup target add x86_64-pc-windows-msvc
+        
     - name: Show version
       run: cargo --version
 
