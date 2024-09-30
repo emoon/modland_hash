@@ -3,7 +3,7 @@ use clap::Parser;
 use indicatif::{ProgressBar, ProgressState, ProgressStyle};
 use rayon::prelude::*;
 use regex::Regex;
-use rusqlite::{params, Connection, types::ValueRef};
+use rusqlite::{params, types::ValueRef, Connection};
 use sha2::Digest;
 use simple_logger::SimpleLogger;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -151,7 +151,6 @@ impl Hash for DatabaseMeta {
 
 impl Eq for DatabaseMeta {}
 
-
 /// Module for hashing
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
@@ -172,7 +171,7 @@ struct Args {
     #[clap(short, long)]
     recursive: bool,
 
-    /// Instead of matching on hash or pattern hash match the samples in the files 
+    /// Instead of matching on hash or pattern hash match the samples in the files
     #[clap(long)]
     match_samples: bool,
 
@@ -264,9 +263,15 @@ impl Filters {
 
         Filters {
             include_paths: Self::init_filter(&args.include_paths.to_ascii_lowercase(), ""),
-            include_file_extensions: Self::init_filter(&args.include_file_extensions.to_ascii_lowercase(), "."),
+            include_file_extensions: Self::init_filter(
+                &args.include_file_extensions.to_ascii_lowercase(),
+                ".",
+            ),
             exclude_paths: Self::init_filter(&args.exclude_paths.to_ascii_lowercase(), ""),
-            exclude_file_extensions: Self::init_filter(&args.exclude_file_extensions.to_ascii_lowercase(), "."),
+            exclude_file_extensions: Self::init_filter(
+                &args.exclude_file_extensions.to_ascii_lowercase(),
+                ".",
+            ),
             sample_search,
             search_filename,
         }
@@ -295,10 +300,10 @@ impl Filters {
         for i in input {
             let filename = i.filename.to_ascii_lowercase();
 
-            if !Self::starts_with(&filename, &self.exclude_paths, false) 
+            if !Self::starts_with(&filename, &self.exclude_paths, false)
                 && !Self::ends_with(&filename, &self.exclude_file_extensions, false)
                 && Self::starts_with(&filename, &self.include_paths, true)
-                && Self::ends_with(&filename, &self.include_file_extensions, true) 
+                && Self::ends_with(&filename, &self.include_file_extensions, true)
             {
                 output.push(i.clone());
             }
@@ -378,7 +383,10 @@ fn get_files(path: &str, recurse: bool) -> Vec<String> {
             let metadata = file.metadata().unwrap();
 
             if let Some(filename) = file.path().to_str() {
-                if metadata.is_file() && !filename.ends_with(".listing") && !filename.contains("modland_hash") {
+                if metadata.is_file()
+                    && !filename.ends_with(".listing")
+                    && !filename.contains("modland_hash")
+                {
                     pb.set_message(filename.to_owned());
                     return Some(filename.to_owned());
                 }
@@ -945,7 +953,7 @@ fn match_samples(dir: &str, db: &Connection, args: &Args) -> Result<()> {
         if info.samples.is_empty() {
             continue;
         }
-        
+
         let mut max_len = 0;
         for line in &info.samples {
             max_len = std::cmp::max(line.text.chars().count(), max_len);
@@ -982,14 +990,22 @@ fn match_samples(dir: &str, db: &Connection, args: &Args) -> Result<()> {
                 }
             }
 
-            print!("{:02} {}", sample.sample_id, &sample.text[1..sample.text.len() - 1]);
+            print!(
+                "{:02} {}",
+                sample.sample_id,
+                &sample.text[1..sample.text.len() - 1]
+            );
 
             for _ in sample.text.chars().count()..max_len - 1 {
                 print!(" ");
             }
 
             if !matching_data.is_empty() {
-                println!("({} duplicates) length {}", matching_data.len(), sample.length);
+                println!(
+                    "({} duplicates) length {}",
+                    matching_data.len(),
+                    sample.length
+                );
             } else {
                 println!("length {}", sample.length);
             }
@@ -1008,9 +1024,13 @@ fn match_samples(dir: &str, db: &Connection, args: &Args) -> Result<()> {
         }
 
         for i in top_samples {
-            println!("-------------------------------------------------------------------------------");
+            println!(
+                "-------------------------------------------------------------------------------"
+            );
             println!("{:02} {}", i.original_sample_id, i.text);
-            println!("-------------------------------------------------------------------------------");
+            println!(
+                "-------------------------------------------------------------------------------"
+            );
             let mut max_len = 0;
             for m in &i.matching_samples {
                 max_len = std::cmp::max(m.text.chars().count(), max_len);
@@ -1043,7 +1063,13 @@ fn check_for_db_file() -> Option<PathBuf> {
     }
 }
 
-fn get_dupes(db: &Connection, args: &Args, get_songs_query: &str, get_by_id: &str, dupe_limit: usize) -> Result<Vec<Vec<DatabaseMeta>>> {
+fn get_dupes(
+    db: &Connection,
+    args: &Args,
+    get_songs_query: &str,
+    get_by_id: &str,
+    dupe_limit: usize,
+) -> Result<Vec<Vec<DatabaseMeta>>> {
     let mut hash_dupes = Vec::with_capacity(700_0000);
     let filters = Filters::new(args);
 
@@ -1068,7 +1094,7 @@ fn get_dupes(db: &Connection, args: &Args, get_songs_query: &str, get_by_id: &st
                 } else {
                     hash_id_lookup_int.insert(v);
                 }
-            
+
                 stmnt.query(params![v])?
             }
 
@@ -1080,19 +1106,19 @@ fn get_dupes(db: &Connection, args: &Args, get_songs_query: &str, get_by_id: &st
                 } else {
                     hash_id_lookup_string.insert(v.clone());
                 }
-            
+
                 stmnt.query(params![v])?
             }
 
             _ => panic!(),
         };
-        
+
         while let Some(row) = song_rows.next()? {
             let song_id: u64 = row.get(0)?;
             let filename: String = row.get(1)?;
             let metadata = DatabaseMeta {
                 filename,
-                samples: Vec::new(), 
+                samples: Vec::new(),
             };
             vals.push(metadata);
             song_ids.push(song_id);
@@ -1105,7 +1131,7 @@ fn get_dupes(db: &Connection, args: &Args, get_songs_query: &str, get_by_id: &st
         if filters.sample_search.is_some() || args.print_sample_names {
             for (metadata, song_id) in vals.iter_mut().zip(song_ids.iter()) {
                 let t = get_samples_from_song_id(db, *song_id)?;
-                metadata.samples = t; 
+                metadata.samples = t;
             }
         }
 
@@ -1126,16 +1152,20 @@ fn print_db_duplicates(db: &Connection, args: &Args) -> Result<()> {
     let filters = Filters::new(args);
 
     let hash_dupes = get_dupes(
-        db, args, 
+        db,
+        args,
         "SELECT hash_id FROM files",
         "SELECT song_id, url FROM files where hash_id = ?",
-        1)?;
+        1,
+    )?;
 
     let pattern_dupes = get_dupes(
-        db, args, 
+        db,
+        args,
         "SELECT pattern_hash FROM files",
         "SELECT song_id, url FROM files where pattern_hash = ?",
-        1)?;
+        1,
+    )?;
 
     for (index, v) in hash_dupes.iter().enumerate() {
         println!("\n==================================================================");
@@ -1170,10 +1200,12 @@ fn print_db(db: &Connection, args: &Args) -> Result<()> {
     let filters = Filters::new(args);
 
     let entries = get_dupes(
-        db, args, 
+        db,
+        args,
         "SELECT hash_id FROM files",
         "SELECT song_id, url FROM files where hash_id = ?",
-        0)?;
+        0,
+    )?;
 
     for (_index, v) in entries.iter().enumerate() {
         for e in v {
@@ -1243,10 +1275,12 @@ fn print_sample_rows(rows: &mut rusqlite::Rows, args: &Args) -> Result<()> {
 }
 
 fn match_db_with_sample_length(db: &Connection, args: &Args, length: usize) -> Result<()> {
-    let statement = format!("
+    let statement = format!(
+        "
         SELECT song_sample_id, text, files.url 
         FROM samples JOIN files ON samples.song_id = files.song_id WHERE samples.length = {}",
-        length);
+        length
+    );
 
     let mut stmnt = db.prepare(&statement)?;
     let mut rows = stmnt.query([])?;
@@ -1255,17 +1289,18 @@ fn match_db_with_sample_length(db: &Connection, args: &Args, length: usize) -> R
 }
 
 fn match_db_with_sample_length_bytes(db: &Connection, args: &Args, length: usize) -> Result<()> {
-    let statement = format!("
+    let statement = format!(
+        "
         SELECT song_sample_id, text, files.url 
         FROM samples JOIN files ON samples.song_id = files.song_id WHERE samples.length_bytes = {}",
-        length);
+        length
+    );
 
     let mut stmnt = db.prepare(&statement)?;
     let mut rows = stmnt.query([])?;
 
     print_sample_rows(&mut rows, args)
 }
-
 
 fn main() -> Result<()> {
     let args = Args::parse();
