@@ -403,6 +403,12 @@ fn get_url(filename: &str) -> String {
     format!("https://ftp.modland.com{}", filename)
 }
 
+fn get_stored_url(filename: &str) -> String {
+    let filename = filename.replace(' ', "%20");
+    filename.replace('\'', "%27")
+}
+
+
 // Fetches info for a track/song
 fn get_track_info(filename: &str, dump_patterns: bool) -> TrackInfo {
     // Calculate sha256 of the file
@@ -583,7 +589,7 @@ fn build_database(out_filename: &str, database_path: &str, args: &Args) {
                 index,
                 &track.sha256_hash,
                 pattern_hash,
-                get_url(&track.filename));
+                get_stored_url(&track.filename));
 
         tx.send(DbCommand::Insert(insert)).expect("Failed to send command");
 
