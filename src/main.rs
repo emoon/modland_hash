@@ -391,6 +391,7 @@ fn get_files(path: &str, recurse: bool) -> Vec<String> {
 
 fn get_url(filename: &str) -> String {
     let filename = filename.replace(' ', "%20");
+    let filename = filename.replace('\'', "%27");
     format!("https://ftp.modland.com{}", filename)
 }
 
@@ -576,7 +577,7 @@ fn build_database(out_filename: &str, database_path: &str, args: &Args) {
                 pattern_hash,
                 get_url(&track.filename));
 
-         tx.send(DbCommand::Insert(insert)).expect("Failed to send command");
+        tx.send(DbCommand::Insert(insert)).expect("Failed to send command");
 
         for sample in &track.samples {
             let insert = format!("INSERT INTO samples (hash_id, song_id, song_sample_id, text, length_bytes, length) VALUES ({}, {}, {}, {}, {}, {})", 
