@@ -408,7 +408,6 @@ fn get_stored_url(filename: &str) -> String {
     filename.replace('\'', "%27")
 }
 
-
 // Fetches info for a track/song
 fn get_track_info(filename: &str, dump_patterns: bool) -> TrackInfo {
     // Calculate sha256 of the file
@@ -570,7 +569,7 @@ fn build_database(out_filename: &str, database_path: &str, args: &Args) {
 
     let files = get_files(database_path, args.recursive);
 
-    let spinner_style =
+    let _spinner_style =
         ProgressStyle::with_template("{prefix:.bold.dim} {wide_bar} {pos}/{len}").unwrap();
 
     //let pb = ProgressBar::new(files.len() as _);
