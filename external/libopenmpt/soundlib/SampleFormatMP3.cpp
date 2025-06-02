@@ -73,8 +73,6 @@ using mpg123_off_t = off_t;
 
 using mpg123_size_t = size_t;
 
-#endif
-
 // Check for exactly _MSC_VER as libmpg123 does, in order to also catch clang-cl.
 #ifdef _MSC_VER
 // ssize_t definition in libmpg123.h.in should never have existed at all.
@@ -82,6 +80,8 @@ using mpg123_size_t = size_t;
 using mpg123_ssize_t = ptrdiff_t;
 #else
 using mpg123_ssize_t = ssize_t;
+#endif
+
 #endif
 
 class ComponentMPG123
@@ -95,7 +95,7 @@ public:
 	static int FileReaderRead(void *fp, void *buf, size_t count, size_t *returned)
 	{
 		FileReader &file = *static_cast<FileReader *>(fp);
-		std::size_t readBytes = std::min(count, static_cast<size_t>(file.BytesLeft()));
+		std::size_t readBytes = std::min(count, mpt::saturate_cast<size_t>(file.BytesLeft()));
 		file.ReadRaw(mpt::span(mpt::void_cast<std::byte*>(buf), readBytes));
 		if(!returned)
 		{
@@ -219,7 +219,7 @@ static mpt::ustring ReadMPG123String(const char (&str)[N])
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wframe-larger-than=16000"
 #endif // MPT_COMPILER_GCC
-#if MPT_CLANG_AT_LEAST(13,0,0)
+#if (MPT_CLANG_AT_LEAST(13,0,0) && !defined(MPT_COMPILER_QUIRK_APPLE_CLANG)) || MPT_CLANG_AT_LEAST(13,1,0)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wframe-larger-than"
 #endif // MPT_COMPILER_CLANG
@@ -227,7 +227,7 @@ static MPT_NOINLINE int mp3dec_decode_frame_no_inline(mp3dec_t *dec, const uint8
 {
 	return mp3dec_decode_frame(dec, mp3, mp3_bytes, pcm, info);
 }
-#if MPT_CLANG_AT_LEAST(13,0,0)
+#if (MPT_CLANG_AT_LEAST(13,0,0) && !defined(MPT_COMPILER_QUIRK_APPLE_CLANG)) || MPT_CLANG_AT_LEAST(13,1,0)
 #pragma clang diagnostic pop
 #endif // MPT_COMPILER_CLANG
 #if MPT_COMPILER_GCC

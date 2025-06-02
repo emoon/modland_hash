@@ -5,12 +5,12 @@
 
 
 
-#include "mpt/base/detect_compiler.hpp"
-#include "mpt/base/detect_libcxx.hpp"
+#include "mpt/base/detect.hpp"
 #include "mpt/base/namespace.hpp"
 
-#if MPT_CXX_BEFORE(20)
+#if MPT_CXX_BEFORE(20) || MPT_LIBCXX_LLVM_BEFORE(13000)
 #include "mpt/base/saturate_cast.hpp"
+#include "mpt/base/saturate_round.hpp"
 #endif
 
 #if MPT_CXX_BEFORE(23) && !MPT_COMPILER_MSVC && !MPT_COMPILER_GCC && !MPT_COMPILER_CLANG
@@ -36,17 +36,58 @@ MPT_CONSTEXPRINLINE Tdst c_cast(Tsrc && x) {
 
 
 
+template <typename Tdst, typename Tsrc>
+MPT_CONSTEXPRINLINE Tdst function_pointer_cast(Tsrc f) {
+#if !defined(MPT_LIBCXX_QUIRK_INCOMPLETE_IS_FUNCTION)
+	// MinGW64 std::is_function is always false for non __cdecl functions.
+	// Issue is similar to <https://connect.microsoft.com/VisualStudio/feedback/details/774720/stl-is-function-bug>.
+	static_assert(std::is_pointer<typename std::remove_cv<Tsrc>::type>::value);
+	static_assert(std::is_pointer<typename std::remove_cv<Tdst>::type>::value);
+	static_assert(std::is_function<typename std::remove_pointer<typename std::remove_cv<Tsrc>::type>::type>::value);
+	static_assert(std::is_function<typename std::remove_pointer<typename std::remove_cv<Tdst>::type>::type>::value);
+#endif
+#if (MPT_CLANG_AT_LEAST(19, 0, 0) && !MPT_OS_ANDROID) || MPT_CLANG_AT_LEAST(20, 0, 0)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcast-function-type-mismatch"
+#endif
+	return reinterpret_cast<Tdst>(f);
+#if (MPT_CLANG_AT_LEAST(19, 0, 0) && !MPT_OS_ANDROID) || MPT_CLANG_AT_LEAST(20, 0, 0)
+#pragma clang diagnostic pop
+#endif
+}
+
+
+
 #if MPT_CXX_AT_LEAST(20) && !MPT_LIBCXX_LLVM_BEFORE(13000)
 
 using std::in_range;
 
 #else
 
+namespace detail {
+
+template <typename Tdst, typename Tsrc>
+constexpr Tdst saturate_cast(Tsrc src) noexcept {
+	return mpt::saturate_cast<Tdst>(src);
+}
+
+template <typename Tdst>
+constexpr Tdst saturate_cast(double src) {
+	return mpt::saturate_trunc<Tdst>(src);
+}
+
+template <typename Tdst>
+constexpr Tdst saturate_cast(float src) {
+	return mpt::saturate_trunc<Tdst>(src);
+}
+
+} // namespace detail
+
 // Returns true iff Tdst can represent the value val.
 // Use as if(mpt::in_range<uint8>(-1)).
 template <typename Tdst, typename Tsrc>
 constexpr bool in_range(Tsrc val) {
-	return (static_cast<Tsrc>(mpt::saturate_cast<Tdst>(val)) == val);
+	return (static_cast<Tsrc>(mpt::detail::saturate_cast<Tdst>(val)) == val);
 }
 
 #endif
@@ -196,7 +237,7 @@ constexpr bool cmp_greater_equal(Ta a, Tb b) noexcept {
 
 
 
-#if MPT_CXX_AT_LEAST(23)
+#if MPT_CXX_AT_LEAST(23) && !MPT_LIBCXX_GNU_BEFORE(12)
 
 using std::unreachable;
 

@@ -365,13 +365,13 @@ fn get_files(path: &str, recurse: bool) -> Vec<String> {
         return vec![path.to_owned()];
     }
 
-    let spinner_style = ProgressStyle::with_template("{prefix:.bold.dim} {spinner} {wide_msg}")
+    let _spinner_style = ProgressStyle::with_template("{prefix:.bold.dim} {spinner} {wide_msg}")
         .unwrap()
         .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈ ");
 
-    let pb = ProgressBar::new(0);
-    pb.set_style(spinner_style);
-    pb.set_prefix(format!("Fetching list of files... [{}/?]", 0));
+    //let pb = ProgressBar::new(0);
+    //pb.set_style(spinner_style);
+    //pb.set_prefix(format!("Fetching list of files... [{}/?]", 0));
 
     let max_depth = if !recurse { 1 } else { usize::MAX };
 
@@ -387,7 +387,7 @@ fn get_files(path: &str, recurse: bool) -> Vec<String> {
                     && !filename.ends_with(".listing")
                     && !filename.contains("modland_hash")
                 {
-                    pb.set_message(filename.to_owned());
+                    //pb.set_message(filename.to_owned());
                     return Some(filename.to_owned());
                 }
             }
@@ -419,6 +419,10 @@ fn get_track_info(filename: &str, dump_patterns: bool) -> TrackInfo {
     let dump_patterns = if dump_patterns { 1 } else { 0 };
 
     let song_data = unsafe { hash_file(file_data.as_ptr(), file_data.len() as _, dump_patterns) };
+
+    if unsafe { (*song_data).hash } == 1 {
+        println!("Song with 0x1ff detected: {}", filename);
+    }
 
     let mut track_info = TrackInfo {
         filename: filename.to_owned(),
@@ -569,10 +573,10 @@ fn build_database(out_filename: &str, database_path: &str, args: &Args) {
     let spinner_style =
         ProgressStyle::with_template("{prefix:.bold.dim} {wide_bar} {pos}/{len}").unwrap();
 
-    let pb = ProgressBar::new(files.len() as _);
-    pb.set_style(spinner_style);
+    //let pb = ProgressBar::new(files.len() as _);
+    //pb.set_style(spinner_style);
 
-    pb.set_prefix("Building database");
+    //pb.set_prefix("Building database");
 
     files.par_iter().enumerate().for_each(|(index, input_path)| {
         let mut track = get_track_info(input_path, args.dump_patterns);
@@ -605,7 +609,7 @@ fn build_database(out_filename: &str, database_path: &str, args: &Args) {
             tx.send(DbCommand::Insert(insert)).expect("Failed to send command");
         }
 
-        pb.inc(1);
+        //pb.inc(1);
     });
 
     println!("Writing database...");

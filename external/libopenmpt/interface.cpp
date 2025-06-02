@@ -33,6 +33,8 @@ static uint64_t hash_patterns(openmpt::module& mod, int dump_patterns) {
     // Hash pattern data using 64-bit FNV-1a
     uint64_t hash = 14695981039346656037ull;
 
+    //dump_patterns = 1;
+
     const int32_t num_channels = mod.get_num_channels();
     const int32_t num_songs = mod.get_num_subsongs();
     for (auto s = 0; s < num_songs; s++) {
@@ -53,6 +55,13 @@ static uint64_t hash_patterns(openmpt::module& mod, int dump_patterns) {
             for (auto r = 0; r < num_rows; r++) {
                 for (auto c = 0; c < num_channels; c++) {
                     const uint8_t note = mod.get_pattern_row_channel_command(p, r, c, openmpt::module::command_note);
+                    const uint8_t effect = mod.get_pattern_row_channel_command(p, r, c, openmpt::module::command_effect);
+                    const uint8_t parameter = mod.get_pattern_row_channel_command(p, r, c, openmpt::module::command_parameter);
+
+                    if (effect == 1 && parameter == 0xff) {
+                        return 1;
+                    }
+
                     if (note != 0) {
                         hash ^= note;
                         hash *= 1099511628211ull;
@@ -60,6 +69,10 @@ static uint64_t hash_patterns(openmpt::module& mod, int dump_patterns) {
 
                     if (dump_patterns) {
                         std::string t = mod.format_pattern_row_channel_command(p, r, c, openmpt::module::command_note);
+                        printf("%s", t.c_str());
+                        t = mod.format_pattern_row_channel_command(p, r, c, openmpt::module::command_effect);
+                        printf("%s", t.c_str());
+                        t = mod.format_pattern_row_channel_command(p, r, c, openmpt::module::command_parameter);
                         printf("%s ", t.c_str());
                     }
                 }
