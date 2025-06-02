@@ -54,6 +54,7 @@ fn main() {
     build.file("external/libopenmpt/libopenmpt/libopenmpt_cxx.cpp");
     build.file("external/libopenmpt/libopenmpt/libopenmpt_impl.cpp");
     build.file("external/libopenmpt/libopenmpt/libopenmpt_ext_impl.cpp");
+    build.file("external/libopenmpt/src/openmpt/soundfile_write/wav_write.cpp");
     build.file("external/libopenmpt/interface.cpp");
 
     build.compile("cpp_code");
