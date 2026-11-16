@@ -67,9 +67,8 @@ struct string_transcoder<mpt::native_path> {
 namespace openmpt123 {
 
 struct show_help_exception {
-	mpt::ustring message;
 	bool longhelp;
-	show_help_exception( const mpt::ustring & msg = MPT_USTRING(""), bool longhelp_ = true ) : message(msg), longhelp(longhelp_) { }
+	show_help_exception( bool longhelp_ = true ) : longhelp(longhelp_) { }
 };
 
 struct args_nofiles_exception {
@@ -204,7 +203,8 @@ struct commandlineflags {
 	bool show_channel_meters = false;
 	bool show_pattern = false;
 	bool use_float = MPT_OS_DJGPP ? false : mpt::float_traits<float>::is_hard && mpt::float_traits<float>::is_ieee754_binary;
-	bool use_stdout = false;
+	bool stdin_data = false;
+	bool stdout_data = false;
 	bool randomize = false;
 	bool shuffle = false;
 	bool restart = false;
@@ -238,22 +238,18 @@ struct commandlineflags {
 		bool canUI = true;
 		bool canProgress = true;
 		if ( !assume_terminal ) {
-#if MPT_OS_WINDOWS
-			canUI = IsTerminal( 0 ) ? true : false;
-			canProgress = IsTerminal( 2 ) ? true : false;
-#else // !MPT_OS_WINDOWS
-			canUI = isatty( STDIN_FILENO ) ? true : false;
-			canProgress = isatty( STDERR_FILENO ) ? true : false;
-#endif // MPT_OS_WINDOWS
+			canUI = mpt::terminal::is_terminal( mpt::terminal::stdio_fd::in ).value_or( false );
+			canProgress = mpt::terminal::is_terminal( mpt::terminal::stdio_fd::err ).value_or( false );
 		}
-		query_terminal_size( terminal_width, terminal_height );
+		mpt::terminal::query_size( terminal_width, terminal_height );
 		if ( filenames.size() == 0 ) {
 			throw args_nofiles_exception();
 		}
-		if ( use_stdout && ( device != commandlineflags().device || !output_filename.empty() ) ) {
+		stdin_data = mpt::contains( filenames, MPT_NATIVE_PATH("-") );
+		if ( stdout_data && ( device != commandlineflags().device || !output_filename.empty() ) ) {
 			throw args_error_exception();
 		}
-		if ( !output_filename.empty() && ( device != commandlineflags().device || use_stdout ) ) {
+		if ( !output_filename.empty() && ( device != commandlineflags().device || stdout_data ) ) {
 			throw args_error_exception();
 		}
 		for ( const auto & filename : filenames ) {

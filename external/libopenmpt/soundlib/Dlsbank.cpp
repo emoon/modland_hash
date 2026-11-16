@@ -1128,7 +1128,7 @@ bool CDLSBank::UpdateSF2PresetData(SF2LoaderInfo &sf2info, const IFFCHUNK &heade
 					sampleType = (sampleType & 0xFFFC) | 0x10;
 
 				dlsSmp.compressed = (sampleType & 0x10);
-				if(((sampleType & 0x7FCF) <= 4) && (p.dwEnd >= p.dwStart + 4))
+				if(((sampleType & 0x7FCF) <= 8) && (p.dwEnd >= p.dwStart + 4))
 				{
 					m_WaveForms[i] = p.dwStart;
 					dlsSmp.dwLen = (p.dwEnd - p.dwStart);
@@ -1926,10 +1926,10 @@ static uint16 ScaleEnvelope(uint32 time, float tempoScale)
 }
 
 
-uint32 DLSENVELOPE::Envelope::ConvertToMPT(InstrumentEnvelope &mptEnv, const EnvelopeType envType, const float tempoScale, const int16 valueScale) const
+uint16 DLSENVELOPE::Envelope::ConvertToMPT(InstrumentEnvelope &mptEnv, const EnvelopeType envType, const float tempoScale, const int16 valueScale) const
 {
 	if(!attack && decay >= 20 * 50 && (!sustainLevel && envType != ENV_PITCH) && release >= 20 * 50)
-		return uint32_max;
+		return uint16_max;
 
 	const EnvelopeNode::value_t neutralValue = (envType == ENV_VOLUME) ? 0 : ENVELOPE_MID;
 	
@@ -2039,13 +2039,13 @@ uint32 DLSENVELOPE::Envelope::ConvertToMPT(InstrumentEnvelope &mptEnv, const Env
 		mptEnv.push_back(lStartTime + releaseTicks, neutralValue);
 		if(releaseTicks > 0)
 		{
-			return 32768 / releaseTicks;
+			return static_cast<uint16>(32768 / releaseTicks);
 		}
 	} else if(!lastIsNeutral)
 	{
 		mptEnv.push_back(mptEnv.back().tick + 1u, neutralValue);
 	}
-	return uint32_max;
+	return uint16_max;
 }
 
 
@@ -2237,9 +2237,9 @@ bool CDLSBank::ExtractInstrument(CSoundFile &sndFile, INSTRUMENTINDEX nInstr, ui
 				// First copy over original channel
 				auto pDest = sampleCopy.sample16() + offsetOrig;
 				if(sample.uFlags[CHN_16BIT])
-					CopySample<SC::ConversionChain<SC::Convert<int16, int16>, SC::DecodeIdentity<int16>>>(pDest, sample.nLength, 2, sample.sample16(), sample.GetSampleSizeInBytes(), 1);
+					CopySample<SC::CopyNative16>(pDest, sample.nLength, 2, sample.sample16(), sample.GetSampleSizeInBytes(), 1);
 				else
-					CopySample<SC::ConversionChain<SC::Convert<int16, int8>, SC::DecodeIdentity<int8>>>(pDest, sample.nLength, 2, sample.sample8(), sample.GetSampleSizeInBytes(), 1);
+					CopySample<SC::Convert<int16, int8>>(pDest, sample.nLength, 2, sample.sample8(), sample.GetSampleSizeInBytes(), 1);
 				sample.FreeSample();
 
 				// Now read the other channel
@@ -2251,16 +2251,16 @@ bool CDLSBank::ExtractInstrument(CSoundFile &sndFile, INSTRUMENTINDEX nInstr, ui
 						pDest = sampleCopy.sample16() + offsetNew;
 						const SmpLength copyLength = std::min(sample.nLength, sampleCopy.nLength);
 						if(sample.uFlags[CHN_16BIT])
-							CopySample<SC::ConversionChain<SC::Convert<int16, int16>, SC::DecodeIdentity<int16>>>(pDest, copyLength, 2, sample.sample16(), sample.GetSampleSizeInBytes(), sample.GetNumChannels());
+							CopySample<SC::CopyNative16>(pDest, copyLength, 2, sample.sample16(), sample.GetSampleSizeInBytes(), sample.GetNumChannels());
 						else
-							CopySample<SC::ConversionChain<SC::Convert<int16, int8>, SC::DecodeIdentity<int8>>>(pDest, copyLength, 2, sample.sample8(), sample.GetSampleSizeInBytes(), sample.GetNumChannels());
+							CopySample<SC::Convert<int16, int8>>(pDest, copyLength, 2, sample.sample8(), sample.GetSampleSizeInBytes(), sample.GetNumChannels());
 					}
 				} else
 				{
 					SmpLength len = std::min(mpt::saturate_cast<SmpLength>(waveData.size() / 2u), sampleCopy.nLength);
 					const std::byte *src = mpt::byte_cast<const std::byte *>(waveData.data());
 					int16 *dst = sampleCopy.sample16() + offsetNew;
-					CopySample<SC::ConversionChain<SC::Convert<int16, int16>, SC::DecodeInt16<0, littleEndian16>>>(dst, len, 2, src, waveData.size(), 1);
+					DecodeSample<SC::DecodeChain<SC::Convert<int16, int16>, SC::DecodeInt16<0, littleEndian16>>>(dst, len, 2, src, waveData.size(), 1);
 				}
 				sample.FreeSample();
 				sample = sampleCopy;
@@ -2280,7 +2280,7 @@ bool CDLSBank::ExtractInstrument(CSoundFile &sndFile, INSTRUMENTINDEX nInstr, ui
 	if ((nEnv) && (nEnv <= m_Envelopes.size()))
 	{
 		const DLSENVELOPE &part = m_Envelopes[nEnv - 1];
-		if(const auto fadeout = part.volumeEnv.ConvertToMPT(pIns->VolEnv, ENV_VOLUME, tempoScale, 3200); fadeout != uint32_max)
+		if(const auto fadeout = part.volumeEnv.ConvertToMPT(pIns->VolEnv, ENV_VOLUME, tempoScale, 3200); fadeout != uint16_max)
 			pIns->nFadeOut = fadeout;
 		if(std::abs(part.pitchEnvDepth) >= 50)
 			part.pitchEnv.ConvertToMPT(pIns->PitchEnv, ENV_PITCH, tempoScale, part.pitchEnvDepth);

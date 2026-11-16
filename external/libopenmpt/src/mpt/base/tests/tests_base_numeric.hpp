@@ -62,6 +62,22 @@ MPT_TEST_GROUP_INLINE("mpt/base/numeric")
 	MPT_TEST_EXPECT_EQUAL(mpt::saturate_align_up<int32>(std::numeric_limits<int32>::max() - 2, 4), std::numeric_limits<int32>::max());
 	MPT_TEST_EXPECT_EQUAL(mpt::saturate_align_up<int32>(std::numeric_limits<int32>::max() - 1, 4), std::numeric_limits<int32>::max());
 	MPT_TEST_EXPECT_EQUAL(mpt::saturate_align_up<int32>(std::numeric_limits<int32>::max() - 0, 4), std::numeric_limits<int32>::max());
+
+	MPT_TEST_EXPECT_EQUAL(mpt::midpoint(2, 3), 2);
+	MPT_TEST_EXPECT_EQUAL(mpt::midpoint(3, 2), 3);
+	MPT_TEST_EXPECT_EQUAL(mpt::midpoint(2, 4), 3);
+	MPT_TEST_EXPECT_EQUAL(mpt::midpoint(4, 2), 3);
+	MPT_TEST_EXPECT_EQUAL(mpt::midpoint(-1, 1), 0);
+	MPT_TEST_EXPECT_EQUAL(mpt::midpoint(1, -1), 0);
+	MPT_TEST_EXPECT_EQUAL(mpt::midpoint(std::numeric_limits<int>::min(), std::numeric_limits<int>::max()), -1);
+	MPT_TEST_EXPECT_EQUAL(mpt::midpoint(std::numeric_limits<int>::max(), std::numeric_limits<int>::min()), 0);
+	MPT_TEST_EXPECT_EQUAL(mpt::midpoint(std::numeric_limits<int>::min() + 2, std::numeric_limits<int>::min()), std::numeric_limits<int>::min() + 1);
+	MPT_TEST_EXPECT_EQUAL(mpt::midpoint(std::numeric_limits<int>::min(), std::numeric_limits<int>::min() + 2), std::numeric_limits<int>::min() + 1);
+	MPT_TEST_EXPECT_EQUAL(mpt::midpoint(std::numeric_limits<int>::max() - 2, std::numeric_limits<int>::max()), std::numeric_limits<int>::max() - 1);
+	MPT_TEST_EXPECT_EQUAL(mpt::midpoint(std::numeric_limits<int>::max(), std::numeric_limits<int>::max() - 2), std::numeric_limits<int>::max() - 1);
+	unsigned char dummy[8];
+	MPT_TEST_EXPECT_EQUAL(mpt::midpoint(&dummy[2], &dummy[3]), &dummy[2]);
+	MPT_TEST_EXPECT_EQUAL(mpt::midpoint(&dummy[3], &dummy[2]), &dummy[3]);
 }
 
 } // namespace numeric

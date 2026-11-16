@@ -11,7 +11,9 @@
 #include "mpt/base/macros.hpp"
 #include "mpt/base/namespace.hpp"
 #include "mpt/base/utility.hpp"
+#if MPT_WINNT_BEFORE(MPT_WIN_2000)
 #include "mpt/osinfo/windows_version.hpp"
+#endif
 
 #include <algorithm>
 #include <array>
@@ -65,7 +67,7 @@ namespace x86 {
 
 
 
-using feature_flags = mpt::arch::basic_feature_flags<uint32>;
+using feature_flags = mpt::arch::basic_feature_flags<uint64>;
 
 
 using mode_flags = mpt::arch::basic_feature_flags<uint8>;
@@ -76,44 +78,46 @@ using mode_flags = mpt::arch::basic_feature_flags<uint8>;
 
 namespace feature {
 inline constexpr feature_flags none           = feature_flags{};
-inline constexpr feature_flags intel386       = feature_flags{ 0x0000'0001 };
-inline constexpr feature_flags fpu            = feature_flags{ 0x0000'0002 };
-inline constexpr feature_flags fsin           = feature_flags{ 0x0000'0004 };
-inline constexpr feature_flags intel486       = feature_flags{ 0x0000'0008 };  // XADD, BSWAP, CMPXCHG
-inline constexpr feature_flags cpuid          = feature_flags{ 0x0000'0010 };
-inline constexpr feature_flags tsc            = feature_flags{ 0x0000'0020 };
-inline constexpr feature_flags cx8            = feature_flags{ 0x0000'0040 };
-inline constexpr feature_flags cmov           = feature_flags{ 0x0000'0080 };
-inline constexpr feature_flags mmx            = feature_flags{ 0x0000'0100 };
-inline constexpr feature_flags mmxext         = feature_flags{ 0x0000'0200 };
-inline constexpr feature_flags x3dnow         = feature_flags{ 0x0000'0400 };
-inline constexpr feature_flags x3dnowext      = feature_flags{ 0x0000'0800 };
-inline constexpr feature_flags x3dnowprefetch = feature_flags{ 0x0000'1000 };
-inline constexpr feature_flags fxsr           = feature_flags{ 0x0000'2000 };
-inline constexpr feature_flags sse            = feature_flags{ 0x0000'4000 };
-inline constexpr feature_flags sse2           = feature_flags{ 0x0000'8000 };
-inline constexpr feature_flags sse3           = feature_flags{ 0x0001'0000 };
-inline constexpr feature_flags ssse3          = feature_flags{ 0x0002'0000 };
-inline constexpr feature_flags sse4_1         = feature_flags{ 0x0004'0000 };
-inline constexpr feature_flags sse4_2         = feature_flags{ 0x0008'0000 };
-inline constexpr feature_flags xsave          = feature_flags{ 0x0010'0000 };
-inline constexpr feature_flags avx            = feature_flags{ 0x0020'0000 };
-inline constexpr feature_flags avx2           = feature_flags{ 0x0040'0000 };
-inline constexpr feature_flags cx16           = feature_flags{ 0x0080'0000 };
-inline constexpr feature_flags lahf           = feature_flags{ 0x0100'0000 };
-inline constexpr feature_flags popcnt         = feature_flags{ 0x0200'0000 };
-inline constexpr feature_flags bmi1           = feature_flags{ 0x0400'0000 };
-inline constexpr feature_flags bmi2           = feature_flags{ 0x0800'0000 };
-inline constexpr feature_flags f16c           = feature_flags{ 0x1000'0000 };
-inline constexpr feature_flags fma            = feature_flags{ 0x2000'0000 };
-inline constexpr feature_flags lzcnt          = feature_flags{ 0x4000'0000 };
-inline constexpr feature_flags movbe          = feature_flags{ 0x8000'0000 };
+inline constexpr feature_flags intel386       = feature_flags{ 1ull <<  0 };
+inline constexpr feature_flags fpu            = feature_flags{ 1ull <<  1 };
+inline constexpr feature_flags fsin           = feature_flags{ 1ull <<  2 };
+inline constexpr feature_flags intel486       = feature_flags{ 1ull <<  3 };  // XADD, BSWAP, CMPXCHG
+inline constexpr feature_flags cpuid          = feature_flags{ 1ull <<  4 };
+inline constexpr feature_flags tsc            = feature_flags{ 1ull <<  5 };
+inline constexpr feature_flags cx8            = feature_flags{ 1ull <<  6 };
+inline constexpr feature_flags cmov           = feature_flags{ 1ull <<  7 };
+inline constexpr feature_flags mmx            = feature_flags{ 1ull <<  8 };
+inline constexpr feature_flags mmxext         = feature_flags{ 1ull <<  9 };
+inline constexpr feature_flags x3dnow         = feature_flags{ 1ull << 10 };
+inline constexpr feature_flags x3dnowext      = feature_flags{ 1ull << 11 };
+inline constexpr feature_flags x3dnowprefetch = feature_flags{ 1ull << 12 };
+inline constexpr feature_flags fxsr           = feature_flags{ 1ull << 13 };
+inline constexpr feature_flags sse            = feature_flags{ 1ull << 14 };
+inline constexpr feature_flags sse2           = feature_flags{ 1ull << 15 };
+inline constexpr feature_flags sse3           = feature_flags{ 1ull << 16 };
+inline constexpr feature_flags ssse3          = feature_flags{ 1ull << 17 };
+inline constexpr feature_flags sse4_1         = feature_flags{ 1ull << 18 };
+inline constexpr feature_flags sse4_2         = feature_flags{ 1ull << 19 };
+inline constexpr feature_flags rdtscp         = feature_flags{ 1ull << 20 };
+inline constexpr feature_flags xsave          = feature_flags{ 1ull << 21 };
+inline constexpr feature_flags avx            = feature_flags{ 1ull << 22 };
+inline constexpr feature_flags avx2           = feature_flags{ 1ull << 23 };
+inline constexpr feature_flags cx16           = feature_flags{ 1ull << 24 };
+inline constexpr feature_flags lahf           = feature_flags{ 1ull << 25 };
+inline constexpr feature_flags popcnt         = feature_flags{ 1ull << 26 };
+inline constexpr feature_flags bmi1           = feature_flags{ 1ull << 27 };
+inline constexpr feature_flags bmi2           = feature_flags{ 1ull << 28 };
+inline constexpr feature_flags f16c           = feature_flags{ 1ull << 29 };
+inline constexpr feature_flags fma            = feature_flags{ 1ull << 30 };
+inline constexpr feature_flags lzcnt          = feature_flags{ 1ull << 31 };
+inline constexpr feature_flags movbe          = feature_flags{ 1ull << 32 };
+inline constexpr feature_flags tscinvariant   = feature_flags{ 1ull << 33 };
 } // namespace feature
 
 namespace mode {
-inline constexpr mode_flags base      = mode_flags{ 0x00 };
-inline constexpr mode_flags xmm128sse = mode_flags{ 0x01 };
-inline constexpr mode_flags ymm256avx = mode_flags{ 0x02 };
+inline constexpr mode_flags base      = mode_flags{};
+inline constexpr mode_flags xmm128sse = mode_flags{ 1u << 0 };
+inline constexpr mode_flags ymm256avx = mode_flags{ 1u << 1 };
 } // namespace mode
 
 namespace featureset {
@@ -203,7 +207,7 @@ enum class vendor : uint8 {
 
 
 // clang-format off
-[[nodiscard]] MPT_CONSTEVAL feature_flags assumed_features() noexcept {
+[[nodiscard]] MPT_ATTR_ALWAYSINLINE MPT_CONSTEVAL feature_flags assumed_features() noexcept {
 	feature_flags flags{};
 #if MPT_ARCH_X86 || MPT_ARCH_AMD64
 	#ifdef MPT_ARCH_X86_I386
@@ -266,6 +270,9 @@ enum class vendor : uint8 {
 	#ifdef MPT_ARCH_X86_SSE4_2
 		flags |= feature::sse4_2;
 	#endif
+	#ifdef MPT_ARCH_X86_RDTSCP
+		flags |= feature::rdtscp;
+	#endif
 	#ifdef MPT_ARCH_X86_XSAVE
 		flags |= feature::xsave;
 	#endif
@@ -309,7 +316,7 @@ enum class vendor : uint8 {
 
 
 // clang-format off
-[[nodiscard]] MPT_CONSTEVAL mode_flags assumed_modes() noexcept {
+[[nodiscard]] MPT_ATTR_ALWAYSINLINE MPT_CONSTEVAL mode_flags assumed_modes() noexcept {
 	mode_flags flags{};
 #if MPT_ARCH_X86 || MPT_ARCH_AMD64
 	#ifdef MPT_ARCH_X86_SSE
@@ -363,7 +370,7 @@ struct fixed_string {
 #endif
 	}
 	template <std::size_t M>
-	[[nodiscard]] friend MPT_CONSTEXPR20_FUN auto operator+(fixed_string<N> a, fixed_string<M> b) -> fixed_string<N + M> {
+	[[nodiscard]] MPT_ATTR_ALWAYSINLINE friend MPT_CONSTEXPR20_FUN auto operator+(fixed_string<N> a, fixed_string<M> b) -> fixed_string<N + M> {
 		fixed_string<N + M> result;
 		std::copy(a.begin(), a.end(), result.data() + 0);
 		std::copy(b.begin(), b.end(), result.data() + N);
@@ -391,53 +398,54 @@ private:
 	bool Virtualized = false;
 	fixed_string<12> HypervisorVendor;
 	fixed_string<4> HypervisorInterface;
+	uint64 TSC_Frequency = 0;
 #if !MPT_ARCH_AMD64
 	bool LongMode = false;
 #endif // !MPT_ARCH_AMD64
 
 public:
 
-	[[nodiscard]] MPT_CONSTEXPRINLINE bool operator[](feature_flags query_features) const noexcept {
+	[[nodiscard]] MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE constexpr bool operator[](feature_flags query_features) const noexcept {
 		return ((Features & query_features) == query_features);
 	}
 
-	[[nodiscard]] MPT_CONSTEXPRINLINE bool has_features(feature_flags query_features) const noexcept {
+	[[nodiscard]] MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE constexpr bool has_features(feature_flags query_features) const noexcept {
 		return ((Features & query_features) == query_features);
 	}
 
-	[[nodiscard]] MPT_CONSTEXPRINLINE feature_flags get_features() const noexcept {
+	[[nodiscard]] MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE constexpr feature_flags get_features() const noexcept {
 		return Features;
 	}
 
-	[[nodiscard]] MPT_CONSTEXPRINLINE bool operator[](mode_flags query_modes) const noexcept {
+	[[nodiscard]] MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE constexpr bool operator[](mode_flags query_modes) const noexcept {
 		return ((Modes & query_modes) == query_modes);
 	}
 
-	[[nodiscard]] MPT_CONSTEXPRINLINE bool enabled_modes(mode_flags query_modes) const noexcept {
+	[[nodiscard]] MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE constexpr bool enabled_modes(mode_flags query_modes) const noexcept {
 		return ((Modes & query_modes) == query_modes);
 	}
 
-	[[nodiscard]] MPT_CONSTEXPRINLINE mode_flags get_modes() const noexcept {
+	[[nodiscard]] MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE constexpr mode_flags get_modes() const noexcept {
 		return Modes;
 	}
 
-	[[nodiscard]] MPT_CONSTEXPRINLINE uint32 get_cpuid() const noexcept {
+	[[nodiscard]] MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE constexpr uint32 get_cpuid() const noexcept {
 		return CPUID;
 	}
 
-	[[nodiscard]] MPT_CONSTEXPRINLINE vendor get_vendor() const noexcept {
+	[[nodiscard]] MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE constexpr vendor get_vendor() const noexcept {
 		return Vendor;
 	}
 
-	[[nodiscard]] MPT_CONSTEXPRINLINE uint16 get_family() const noexcept {
+	[[nodiscard]] MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE constexpr uint16 get_family() const noexcept {
 		return Family;
 	}
 
-	[[nodiscard]] MPT_CONSTEXPRINLINE uint8 get_model() const noexcept {
+	[[nodiscard]] MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE constexpr uint8 get_model() const noexcept {
 		return Model;
 	}
 
-	[[nodiscard]] MPT_CONSTEXPRINLINE uint8 get_stepping() const noexcept {
+	[[nodiscard]] MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE constexpr uint8 get_stepping() const noexcept {
 		return Stepping;
 	}
 
@@ -449,11 +457,15 @@ public:
 		return std::string(BrandID);
 	}
 
-	[[nodiscard]] MPT_CONSTEXPRINLINE bool is_virtual() const noexcept {
+	[[nodiscard]] MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE constexpr bool is_virtual() const noexcept {
 		return Virtualized;
 	}
 
-	[[nodiscard]] MPT_CONSTEXPRINLINE bool can_long_mode() const noexcept {
+	[[nodiscard]] MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE constexpr uint64 get_tsc_frequency() const noexcept {
+		return TSC_Frequency;
+	}
+
+	[[nodiscard]] MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE constexpr bool can_long_mode() const noexcept {
 #if !MPT_ARCH_AMD64
 		return LongMode;
 #else  // MPT_ARCH_AMD64
@@ -461,9 +473,9 @@ public:
 #endif // !MPT_ARCH_AMD64
 	}
 
-private:
-
 #if MPT_ARCH_X86 || MPT_ARCH_AMD64
+
+public:
 
 	struct cpuid_result {
 
@@ -472,7 +484,7 @@ private:
 		uint32 c = 0;
 		uint32 d = 0;
 
-		[[nodiscard]] MPT_CONSTEXPR20_FUN fixed_string<4> as_text4() const noexcept {
+		[[nodiscard]] MPT_ATTR_ALWAYSINLINE MPT_CONSTEXPR20_FUN fixed_string<4> as_text4() const noexcept {
 			fixed_string<4> result;
 			result[0 + 0] = static_cast<char>((a >> 0) & 0xff);
 			result[0 + 1] = static_cast<char>((a >> 8) & 0xff);
@@ -481,7 +493,7 @@ private:
 			return result;
 		}
 
-		[[nodiscard]] MPT_CONSTEXPR20_FUN fixed_string<12> as_text12bcd() const noexcept {
+		[[nodiscard]] MPT_ATTR_ALWAYSINLINE MPT_CONSTEXPR20_FUN fixed_string<12> as_text12bcd() const noexcept {
 			fixed_string<12> result;
 			result[0 + 0] = static_cast<char>((b >> 0) & 0xff);
 			result[0 + 1] = static_cast<char>((b >> 8) & 0xff);
@@ -498,7 +510,7 @@ private:
 			return result;
 		}
 
-		[[nodiscard]] MPT_CONSTEXPR20_FUN fixed_string<12> as_text12bdc() const noexcept {
+		[[nodiscard]] MPT_ATTR_ALWAYSINLINE MPT_CONSTEXPR20_FUN fixed_string<12> as_text12bdc() const noexcept {
 			fixed_string<12> result;
 			result[0 + 0] = static_cast<char>((b >> 0) & 0xff);
 			result[0 + 1] = static_cast<char>((b >> 8) & 0xff);
@@ -515,7 +527,7 @@ private:
 			return result;
 		}
 
-		[[nodiscard]] MPT_CONSTEXPR20_FUN fixed_string<16> as_text16() const noexcept {
+		[[nodiscard]] MPT_ATTR_ALWAYSINLINE MPT_CONSTEXPR20_FUN fixed_string<16> as_text16() const noexcept {
 			fixed_string<16> result;
 			result[0 + 0] = static_cast<char>((a >> 0) & 0xff);
 			result[0 + 1] = static_cast<char>((a >> 8) & 0xff);
@@ -539,7 +551,7 @@ private:
 
 #if MPT_COMPILER_MSVC || MPT_COMPILER_GCC || MPT_COMPILER_CLANG
 
-	[[nodiscard]] static cpuid_result cpuid(uint32 function) noexcept {
+	[[nodiscard]] MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE static cpuid_result cpuid(uint32 function) noexcept {
 
 #if MPT_COMPILER_MSVC
 
@@ -589,7 +601,7 @@ private:
 		result.d = d;
 		return result;
 
-#elif 0
+#elif MPT_COMPILER_GCC || MPT_COMPILER_CLANG
 
 		cpuid_result result;
 		unsigned int a{};
@@ -615,7 +627,7 @@ private:
 #endif // MPT_COMPILER
 	}
 
-	[[nodiscard]] static cpuid_result cpuidex(uint32 function_a, uint32 function_c) noexcept {
+	[[nodiscard]] MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE static cpuid_result cpuidex(uint32 function_a, uint32 function_c) noexcept {
 
 #if MPT_COMPILER_MSVC
 
@@ -665,7 +677,7 @@ private:
 		result.d = d;
 		return result;
 
-#elif 0
+#elif MPT_COMPILER_GCC || MPT_COMPILER_CLANG
 
 		cpuid_result result;
 		unsigned int a{};
@@ -690,6 +702,12 @@ private:
 
 #endif // MPT_COMPILER
 	}
+
+#endif // MPT_COMPILER_MSVC || MPT_COMPILER_GCC || MPT_COMPILER_CLANG
+
+private:
+
+#if MPT_COMPILER_MSVC || MPT_COMPILER_GCC || MPT_COMPILER_CLANG
 
 #if MPT_MODE_KERNEL
 
@@ -784,7 +802,11 @@ private:
 #elif MPT_OS_WINDOWS
 
 		uint8 result = 0;
-#if MPT_WINNT_AT_LEAST(MPT_WIN_NT4)
+#if MPT_WINNT_AT_LEAST(MPT_WIN_2000)
+		if (IsProcessorFeaturePresent(PF_FLOATING_POINT_EMULATED) == 0) {
+			result = 3;
+		}
+#elif MPT_WINNT_AT_LEAST(MPT_WIN_NT4)
 		if (mpt::osinfo::windows::Version::Current().IsAtLeast(mpt::osinfo::windows::Version::Win2000)) {
 			if (IsProcessorFeaturePresent(PF_FLOATING_POINT_EMULATED) == 0) {
 				result = 3;
@@ -862,7 +884,7 @@ private:
 #endif // MPT_COMPILER
 	}
 
-	[[nodiscard]] static bool detect_nexgen() noexcept {
+	[[nodiscard]] MPT_ATTR_NOINLINE MPT_DECL_NOINLINE static bool detect_nexgen() noexcept {
 
 #if MPT_ARCH_X86 && MPT_COMPILER_MSVC
 
@@ -916,7 +938,7 @@ private:
 #endif
 	}
 
-	[[nodiscard]] static bool detect_cyrix() noexcept {
+	[[nodiscard]] MPT_ATTR_NOINLINE MPT_DECL_NOINLINE static bool detect_cyrix() noexcept {
 
 #if MPT_ARCH_X86 && MPT_COMPILER_MSVC
 
@@ -1008,13 +1030,19 @@ private:
 
 public:
 
-	cpu_info() noexcept {
+	[[nodiscard]] MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE static cpu_info query() noexcept {
+		return cpu_info{};
+	}
+
+private:
+
+	MPT_ATTR_NOINLINE MPT_DECL_NOINLINE cpu_info() noexcept {
 
 #if MPT_ARCH_X86 || MPT_ARCH_AMD64
 
 #if MPT_COMPILER_MSVC || MPT_COMPILER_GCC || MPT_COMPILER_CLANG
 
-#if MPT_ARCH_X86 || !MPT_ARCH_X86_AMD64_FAST_DETECT
+#if MPT_ARCH_X86 || (MPT_ARCH_AMD64 && !MPT_ARCH_X86_AMD64_FAST_DETECT)
 
 		Features |= featureset::intel386;
 
@@ -1228,13 +1256,32 @@ public:
 					Virtualized = true;
 				}
 			}
-			if (VendorString.a >= 0x0000'0007u) {
+			if ((VendorString.a >= 0x0000'0007u) && Features.supports(feature::avx)) {
+				// Some Skylake Celerons wrongly report BMI1 even though they do not support it.
+				// They also do not support AVX.
+				// Guard BMI1/BMI2 with AVX, as all known CPUs with BMI1 also support AVX.
+				// See <https://mastodon.gamedev.place/@rygorous/115375820395748540>.
 				cpuid_result ExtendedFeatures = cpuidex(0x0000'0007u, 0x0000'0000u);
 				// clang-format off
 				Features |= (ExtendedFeatures.b & (1u <<  3)) ? (feature::bmi1) : feature::none;
 				Features |= (ExtendedFeatures.b & (1u <<  5)) ? (feature::avx2) : feature::none;
 				Features |= (ExtendedFeatures.b & (1u <<  8)) ? (feature::bmi2) : feature::none;
 				// clang-format on
+			}
+			if ((Vendor == vendor::Intel) && (VendorString.a >= 0x0000'0015u) && Features.supports(feature::tsc | feature::tscinvariant)) {
+				cpuid_result cpuid_0x15 = cpuid(0x0000'0015u);
+				if ((cpuid_0x15.a != 0) && (cpuid_0x15.b != 0)) {
+					if (cpuid_0x15.c == 0) {
+						if (VendorString.a >= 0x0000'0016u) {
+							cpuid_result cpuid_0x16 = cpuid(0x0000'0016u);
+							if ((cpuid_0x16.a & 0x0000'ffffu) != 0) {
+								TSC_Frequency = static_cast<uint64>(cpuid_0x16.a & 0x0000'ffffu) * static_cast<uint64>(1'000'000);
+							}
+						}
+					} else {
+						TSC_Frequency = static_cast<uint64>(cpuid_0x15.c) * static_cast<uint64>(cpuid_0x15.b) / static_cast<uint64>(cpuid_0x15.a);
+					}
+				}
 			}
 			// 3DNow! manual recommends to just execute 0x8000'0000u.
 			// It is totally unknown how earlier CPUs from other vendors
@@ -1309,6 +1356,7 @@ public:
 #endif // !MPT_ARCH_AMD64
 						Features |= (ExtendedFeatureFlags.c & (1u <<  0)) ? (feature::lahf) : feature::none;
 						Features |= (ExtendedFeatureFlags.c & (1u <<  5)) ? (feature::lzcnt) : feature::none;
+						Features |= (ExtendedFeatureFlags.d & (1u << 27)) ? (feature::rdtscp) : feature::none;
 						if (x3dnowknown) {
 							Features |= (ExtendedFeatureFlags.d & (1u << 31)) ? (feature::x3dnow) : feature::none;
 						}
@@ -1322,6 +1370,12 @@ public:
 					}
 					if (ExtendedVendorString.a >= 0x8000'0004u) {
 						BrandID = cpuid(0x8000'0002u).as_text16() + cpuid(0x8000'0003u).as_text16() + cpuid(0x8000'0004u).as_text16();
+					}
+					if (ExtendedVendorString.a >= 0x8000'0007u) {
+						// clang-format off
+						cpuid_result ExtendedFeatureFlags = cpuid(0x8000'0007u);
+						Features |= (ExtendedFeatureFlags.d & (1u <<  8)) ? (feature::tscinvariant) : feature::none;
+						// clang-format on
 					}
 				}
 			}
@@ -1608,7 +1662,7 @@ public:
 
 #if MPT_COMPILER_MSVC
 
-	[[nodiscard]] static MPT_FORCEINLINE uint16 get_x87fcw() noexcept {
+	[[nodiscard]] MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE static uint16 get_x87fcw() noexcept {
 		uint16 tmp = 0;
 		// clang-format off
 		_asm {
@@ -1619,7 +1673,7 @@ public:
 		return tmp;
 	}
 
-	static MPT_FORCEINLINE void set_x87fcw(uint16 fcw) noexcept {
+	MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE static void set_x87fcw(uint16 fcw) noexcept {
 		// clang-format off
 		_asm {
 			fldcw fcw
@@ -1627,25 +1681,25 @@ public:
 		// clang-format on
 	}
 
-	[[nodiscard]] static MPT_FORCEINLINE uint32 get_mxcsr() noexcept {
+	[[nodiscard]] MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE static uint32 get_mxcsr() noexcept {
 		return _mm_getcsr();
 	}
 
-	static MPT_FORCEINLINE void set_mxcsr(uint32 csr) noexcept {
+	MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE static void set_mxcsr(uint32 csr) noexcept {
 		_mm_setcsr(csr);
 	}
 
-	static MPT_FORCEINLINE void fxsave(fxsave_state * state) noexcept {
+	MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE static void fxsave(fxsave_state * state) noexcept {
 		_fxsave(state);
 	}
 
-	static MPT_FORCEINLINE void fxrstor(const fxsave_state * state) noexcept {
+	MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE static void fxrstor(const fxsave_state * state) noexcept {
 		_fxrstor(state);
 	}
 
 #elif MPT_COMPILER_GCC || MPT_COMPILER_CLANG
 
-	[[nodiscard]] static MPT_FORCEINLINE uint16 get_x87fcw() noexcept {
+	[[nodiscard]] MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE static uint16 get_x87fcw() noexcept {
 		typedef unsigned int fpu_control_t __attribute__((__mode__(__HI__)));
 		fpu_control_t tmp = 0;
 		// clang-format off
@@ -1654,7 +1708,7 @@ public:
 		return static_cast<uint16>(tmp);
 	}
 
-	static MPT_FORCEINLINE void set_x87fcw(uint16 fcw) noexcept {
+	MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE static void set_x87fcw(uint16 fcw) noexcept {
 		typedef unsigned int fpu_control_t __attribute__((__mode__(__HI__)));
 		fpu_control_t tmp = fcw;
 		// clang-format off
@@ -1662,7 +1716,7 @@ public:
 		// clang-format on
 	}
 
-	[[nodiscard]] static MPT_FORCEINLINE uint32 get_mxcsr() noexcept {
+	[[nodiscard]] MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE static uint32 get_mxcsr() noexcept {
 #ifdef MPT_ARCH_X86_SSE
 		return __builtin_ia32_stmxcsr();
 #else
@@ -1674,7 +1728,7 @@ public:
 #endif
 	}
 
-	static MPT_FORCEINLINE void set_mxcsr(uint32 csr) noexcept {
+	MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE static void set_mxcsr(uint32 csr) noexcept {
 #ifdef MPT_ARCH_X86_SSE
 #if MPT_COMPILER_GCC
 		// https://gcc.gnu.org/bugzilla/show_bug.cgi?id=55752
@@ -1692,7 +1746,7 @@ public:
 #endif
 	}
 
-	static MPT_FORCEINLINE void fxsave(fxsave_state * state) noexcept {
+	MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE static void fxsave(fxsave_state * state) noexcept {
 #ifdef MPT_ARCH_X86_FXSR
 		__builtin_ia32_fxsave(state);
 #else
@@ -1702,7 +1756,7 @@ public:
 #endif
 	}
 
-	static MPT_FORCEINLINE void fxrstor(const fxsave_state * state) noexcept {
+	MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE static void fxrstor(const fxsave_state * state) noexcept {
 #ifdef MPT_ARCH_X86_FXSR
 		__builtin_ia32_fxrstor(const_cast<fxsave_state *>(state));
 #else
@@ -1714,38 +1768,41 @@ public:
 
 #endif // MPT_COMPILER
 
-	static MPT_FORCEINLINE bool have_fxsr() noexcept {
+	MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE static bool have_fxsr(const cpu_info & info) noexcept {
 #ifdef MPT_ARCH_X86_FXSR
+		MPT_UNUSED(info);
 		return true;
 #else
-		return cpu_info{}[mpt::arch::x86::feature::fxsr];
+		return info[mpt::arch::x86::feature::fxsr];
 #endif
 	}
 
-	static MPT_FORCEINLINE bool have_sse() noexcept {
+	MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE static bool have_sse(const cpu_info & info) noexcept {
 #ifdef MPT_ARCH_X86_SSE
+		MPT_UNUSED(info);
 		return true;
 #else
-		const cpu_info cpu_info;
-		return cpu_info[mpt::arch::x86::feature::sse] && cpu_info[mpt::arch::x86::mode::xmm128sse];
+		return info[mpt::arch::x86::feature::sse] && info[mpt::arch::x86::mode::xmm128sse];
 #endif
 	}
 
-	static MPT_FORCEINLINE uint8 get_fpu_level() noexcept {
+	MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE static uint8 get_fpu_level(const cpu_info & info) noexcept {
 #ifdef MPT_ARCH_X86_FSIN
+		MPT_UNUSED(info);
 		return 3;
 #elif defined(MPT_ARCH_X86_FPU)
-		return cpu_info{}[mpt::arch::x86::feature::fsin] ? 3 : 2;
+		return info[mpt::arch::x86::feature::fsin] ? 3 : 2;
 #else
-		cpu_info tmp{};
-		return tmp[mpt::arch::x86::feature::fsin] ? 3 : tmp[mpt::arch::x86::feature::fpu] ? 2
-																						  : 0;
+		// clang-format off
+		return info[mpt::arch::x86::feature::fsin] ? 3 : info[mpt::arch::x86::feature::fpu] ? 2 : 0;
+		// clang-format on
 #endif
 	}
 
-	static MPT_FORCEINLINE control_state get_state() noexcept {
+	MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE static control_state get_state(const cpu_info & info) noexcept {
 		control_state result;
 #ifdef MPT_ARCH_X86_FXSR
+		MPT_UNUSED(info);
 		fxsave_state tmp = {};
 		fxsave(&tmp);
 		result.x87_level = 3;
@@ -1753,7 +1810,7 @@ public:
 		result.mxcsr_mask = tmp.mxcsr_mask;
 		result.mxcsr = tmp.mxcsr;
 #else
-		if (have_fxsr()) {
+		if (have_fxsr(info)) {
 			fxsave_state tmp = {};
 			fxsave(&tmp);
 			result.x87_level = 3;
@@ -1761,7 +1818,7 @@ public:
 			result.mxcsr_mask = tmp.mxcsr_mask;
 			result.mxcsr = tmp.mxcsr;
 		} else {
-			result.x87_level = get_fpu_level();
+			result.x87_level = get_fpu_level(info);
 			if (result.x87_level > 0) {
 				result.x87fcw = get_x87fcw();
 			}
@@ -1770,8 +1827,9 @@ public:
 		return result;
 	}
 
-	static MPT_FORCEINLINE void set_state(control_state state) noexcept {
+	MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE static void set_state(control_state state, const cpu_info & info) noexcept {
 #ifdef MPT_ARCH_X86_SSE
+		MPT_UNUSED(info);
 		if (state.x87_level) {
 			set_x87fcw(state.x87fcw);
 		}
@@ -1779,7 +1837,7 @@ public:
 			set_mxcsr(state.mxcsr);
 		}
 #else
-		if (have_sse()) {
+		if (have_sse(info)) {
 			if (state.x87_level) {
 				set_x87fcw(state.x87fcw);
 			}
@@ -1788,6 +1846,7 @@ public:
 			}
 		} else {
 #ifdef MPT_ARCH_X86_FXSR
+			MPT_UNUSED(info);
 			fxsave_state tmp = {};
 			fxsave(&tmp);
 			if (state.x87_level) {
@@ -1798,7 +1857,7 @@ public:
 			}
 			fxrstor(&tmp);
 #else
-			if (have_fxsr()) {
+			if (have_fxsr(info)) {
 				fxsave_state tmp = {};
 				fxsave(&tmp);
 				if (state.x87_level) {
@@ -1822,40 +1881,40 @@ public:
 
 #if MPT_COMPILER_MSVC
 
-	[[nodiscard]] static MPT_FORCEINLINE uint16 get_x87fcw() noexcept {
+	[[nodiscard]] MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE static uint16 get_x87fcw() noexcept {
 		fxsave_state state = {};
 		fxsave(&state);
 		return state.fcw;
 	}
 
-	static MPT_FORCEINLINE void set_x87fcw(uint16 fcw) noexcept {
+	MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE static void set_x87fcw(uint16 fcw) noexcept {
 		fxsave_state state = {};
 		fxsave(&state);
 		state.fcw = fcw;
 		fxrstor(&state);
 	}
 
-	[[nodiscard]] static MPT_FORCEINLINE uint32 get_mxcsr() noexcept {
+	[[nodiscard]] MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE static uint32 get_mxcsr() noexcept {
 		return _mm_getcsr();
 	}
 
-	static MPT_FORCEINLINE void set_mxcsr(uint32 csr) noexcept {
+	MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE static void set_mxcsr(uint32 csr) noexcept {
 		_mm_setcsr(csr);
 	}
 
-	static MPT_FORCEINLINE void fxsave(fxsave_state * state) noexcept {
+	MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE static void fxsave(fxsave_state * state) noexcept {
 		_fxsave(state);
 	}
 
-	static MPT_FORCEINLINE void fxrstor(const fxsave_state * state) noexcept {
+	MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE static void fxrstor(const fxsave_state * state) noexcept {
 		_fxrstor(state);
 	}
 
-	static MPT_FORCEINLINE bool have_fxsr() noexcept {
+	MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE static bool have_fxsr() noexcept {
 		return true;
 	}
 
-	static MPT_FORCEINLINE control_state get_state() noexcept {
+	MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE static control_state get_state() noexcept {
 		control_state result;
 		fxsave_state tmp = {};
 		fxsave(&tmp);
@@ -1866,7 +1925,7 @@ public:
 		return result;
 	}
 
-	static MPT_FORCEINLINE void set_state(control_state state) noexcept {
+	MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE static void set_state(control_state state) noexcept {
 		fxsave_state tmp = {};
 		fxsave(&tmp);
 		tmp.fcw = state.x87fcw;
@@ -1877,7 +1936,7 @@ public:
 
 #elif MPT_COMPILER_GCC || MPT_COMPILER_CLANG
 
-	[[nodiscard]] static MPT_FORCEINLINE uint16 get_x87fcw() noexcept {
+	[[nodiscard]] MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE static uint16 get_x87fcw() noexcept {
 		typedef unsigned int fpu_control_t __attribute__((__mode__(__HI__)));
 		fpu_control_t tmp = 0;
 		// clang-format off
@@ -1886,7 +1945,7 @@ public:
 		return static_cast<uint16>(tmp);
 	}
 
-	static MPT_FORCEINLINE void set_x87fcw(uint16 fcw) noexcept {
+	MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE static void set_x87fcw(uint16 fcw) noexcept {
 		typedef unsigned int fpu_control_t __attribute__((__mode__(__HI__)));
 		fpu_control_t tmp = fcw;
 		// clang-format off
@@ -1894,11 +1953,11 @@ public:
 		// clang-format on
 	}
 
-	[[nodiscard]] static MPT_FORCEINLINE uint32 get_mxcsr() noexcept {
+	[[nodiscard]] MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE static uint32 get_mxcsr() noexcept {
 		return __builtin_ia32_stmxcsr();
 	}
 
-	static MPT_FORCEINLINE void set_mxcsr(uint32 csr) noexcept {
+	MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE static void set_mxcsr(uint32 csr) noexcept {
 #if MPT_COMPILER_GCC
 		// https://gcc.gnu.org/bugzilla/show_bug.cgi?id=55752
 		std::atomic_thread_fence(std::memory_order_seq_cst);
@@ -1910,19 +1969,19 @@ public:
 #endif
 	}
 
-	static MPT_FORCEINLINE void fxsave(fxsave_state * state) noexcept {
+	MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE static void fxsave(fxsave_state * state) noexcept {
 		__builtin_ia32_fxsave(state);
 	}
 
-	static MPT_FORCEINLINE void fxrstor(const fxsave_state * state) noexcept {
+	MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE static void fxrstor(const fxsave_state * state) noexcept {
 		__builtin_ia32_fxrstor(const_cast<fxsave_state *>(state));
 	}
 
-	static MPT_FORCEINLINE bool have_fxsr() noexcept {
+	MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE static bool have_fxsr() noexcept {
 		return true;
 	}
 
-	static MPT_FORCEINLINE control_state get_state() noexcept {
+	MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE static control_state get_state() noexcept {
 		control_state result;
 		result.x87_level = 3;
 		result.x87fcw = get_x87fcw();
@@ -1931,7 +1990,7 @@ public:
 		return result;
 	}
 
-	static MPT_FORCEINLINE void set_state(control_state state) noexcept {
+	MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE static void set_state(control_state state) noexcept {
 		set_x87fcw(state.x87fcw);
 		set_mxcsr(state.mxcsr);
 	}
@@ -1946,7 +2005,7 @@ public:
 
 	public:
 
-		MPT_FORCEINLINE guard(std::optional<rounding> rounding, std::optional<bool> denormals_as_zero, std::optional<precision> precision, std::optional<bool> infinity_projective) noexcept
+		MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE guard(std::optional<rounding> rounding, std::optional<bool> denormals_as_zero, std::optional<precision> precision, std::optional<bool> infinity_projective) noexcept
 			: m_oldstate(get_state()) {
 			control_state state = m_oldstate;
 			if (rounding) {
@@ -1975,7 +2034,7 @@ public:
 			set_state(state);
 		}
 
-		MPT_FORCEINLINE ~guard() {
+		MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE ~guard() {
 			set_state(m_oldstate);
 		}
 	};

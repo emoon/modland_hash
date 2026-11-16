@@ -14,12 +14,34 @@
 #include "stdafx.h"
 #include "Loaders.h"
 
+#include "mpt/base/detect.hpp"
 #include "mpt/io/base.hpp"
+
+#if defined(MPT_WITH_ZLIB) || defined(MPT_WITH_MINIZ)
+#include "../common/zlib_helper.h"
+#endif
 
 #if defined(MPT_WITH_ZLIB)
 #include <zlib.h>
 #elif defined(MPT_WITH_MINIZ)
+#if MPT_COMPILER_MSVC
+#pragma warning(push)
+#pragma warning(disable : 4505) // unreferenced function with internal linkage has been removed
+#elif MPT_COMPILER_GCC
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#elif MPT_COMPILER_CLANG
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-function"
+#endif
 #include <miniz/miniz.h>
+#if MPT_COMPILER_MSVC
+//#pragma warning(pop)
+#elif MPT_COMPILER_GCC
+#pragma GCC diagnostic pop
+#elif MPT_COMPILER_CLANG
+#pragma clang diagnostic pop
+#endif
 #endif
 
 
@@ -1016,36 +1038,53 @@ bool CSoundFile::ReadJ2B(FileReader &file, ModLoadingFlags loadFlags)
 	}
 
 	// Header is valid, now unpack the RIFF AM file using inflate
-	z_stream strm{};
-	if(inflateInit(&strm) != Z_OK)
+	zlib::z_inflate_stream strm{};
+	if(!zlib::is_Z_OK(inflateInit(&*strm)))
+	{
 		return false;
-
+	}
 	uint32 remainRead = fileHeader.packedLength, remainWrite = fileHeader.unpackedLength, totalWritten = 0;
 	uint32 crc = 0;
-	std::vector<Bytef> amFileData(remainWrite);
+	std::vector<Bytef> amFileData;
 	int retVal = Z_OK;
-	while(remainRead && remainWrite && retVal != Z_STREAM_END)
+	try
 	{
-		Bytef buffer[mpt::IO::BUFFERSIZE_TINY];
-		uint32 readSize = std::min(static_cast<uint32>(sizeof(buffer)), remainRead);
-		file.ReadRaw(mpt::span(buffer, readSize));
-		crc = static_cast<uint32>(crc32(crc, buffer, readSize));
-
-		strm.avail_in = readSize;
-		strm.next_in = buffer;
-		do
+		amFileData.resize(remainWrite);
+		while(remainRead && remainWrite && retVal != Z_STREAM_END)
 		{
-			strm.avail_out = remainWrite;
-			strm.next_out = amFileData.data() + totalWritten;
-			retVal = inflate(&strm, Z_NO_FLUSH);
-			uint32 written = remainWrite - strm.avail_out;
-			totalWritten += written;
-			remainWrite -= written;
-		} while(remainWrite && strm.avail_out == 0);
+			Bytef buffer[mpt::IO::BUFFERSIZE_TINY];
+			uint32 readSize = std::min(static_cast<uint32>(sizeof(buffer)), remainRead);
+			file.ReadRaw(mpt::span(buffer, readSize));
+			crc = static_cast<uint32>(crc32(crc, buffer, readSize));
 
-		remainRead -= readSize;
+			strm->avail_in = readSize;
+			strm->next_in = buffer;
+			do
+			{
+				strm->avail_out = remainWrite;
+				strm->next_out = amFileData.data() + totalWritten;
+				retVal = inflate(&*strm, Z_NO_FLUSH);
+				if(!zlib::is_Z_OK_or_Z_BUF_ERROR(retVal))
+				{
+					return false;
+				}
+				uint32 written = remainWrite - strm->avail_out;
+				totalWritten += written;
+				remainWrite -= written;
+			} while(remainWrite && strm->avail_out == 0);
+
+			remainRead -= readSize;
+		}
+	} catch(mpt::out_of_memory e)
+	{
+		mpt::rethrow_out_of_memory(e);	
+	} catch(const std::exception &)
+	{
+		return false;
+	} catch(...)
+	{
+		return false;
 	}
-	inflateEnd(&strm);
 
 	bool result = false;
 #ifndef MPT_BUILD_FUZZER

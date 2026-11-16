@@ -330,6 +330,9 @@ std::int32_t module::get_current_tempo() const {
 double module::get_current_tempo2() const {
 	return impl->get_current_tempo2();
 }
+std::int32_t module::get_current_sequence() const {
+	return impl->get_current_sequence();
+}
 std::int32_t module::get_current_order() const {
 	return impl->get_current_order();
 }
@@ -464,10 +467,6 @@ std::string module::ctl_get_text( std::string_view ctl ) const {
 	return impl->ctl_get_text( ctl );
 }
 
-OpenMPT::CSoundFile* module::get_snd_file() {
-    return impl->get_snd_file();
-}
-
 void module::ctl_set( const std::string & ctl, const std::string & value ) {
 	impl->ctl_set( ctl, value );
 }
@@ -482,6 +481,9 @@ void module::ctl_set_floatingpoint( std::string_view ctl, double value ) {
 }
 void module::ctl_set_text( std::string_view ctl, std::string_view value ) {
 	impl->ctl_set_text( ctl, value );
+}
+OpenMPT::CSoundFile* module::get_snd_file() {
+	return impl->get_snd_file();
 }
 
 module_ext::module_ext( std::istream & stream, std::ostream & log, const std::map< std::string, std::string > & ctls ) : ext_impl(0) {

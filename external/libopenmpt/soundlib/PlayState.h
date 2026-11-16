@@ -60,6 +60,8 @@ public:
 	ORDERINDEX m_nSeqOverride = ORDERINDEX_INVALID;  // Queued order to be processed next, regardless of what order would normally follow
 	OrderTransitionMode m_seqOverrideMode = OrderTransitionMode::AtPatternEnd;
 
+	CHANNELINDEX m_lastMovedChannel = CHANNELINDEX_INVALID;  // IT compat Gxx + carry + porta bug emulation
+
 	// Global volume
 public:
 	int32 m_nGlobalVolume = MAX_GLOBAL_VOLUME;  // Current global volume (0...MAX_GLOBAL_VOLUME)
@@ -91,6 +93,12 @@ public:
 
 	void UpdateTimeSignature(const CSoundFile &sndFile) noexcept;
 	void UpdatePPQ(bool patternTransition) noexcept;
+	double PPQPos() const noexcept;
+
+	constexpr bool AtStartOfTick() const noexcept
+	{
+		return m_nBufferCount == m_nSamplesPerTick;
+	}
 
 	constexpr uint32 TicksOnRow() const noexcept
 	{

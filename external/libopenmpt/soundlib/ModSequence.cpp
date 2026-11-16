@@ -21,7 +21,7 @@ OPENMPT_NAMESPACE_BEGIN
 
 
 ModSequence::ModSequence(CSoundFile &sndFile)
-	: m_sndFile(sndFile)
+	: m_sndFile{sndFile}
 {
 }
 
@@ -33,6 +33,8 @@ ModSequence& ModSequence::operator=(const ModSequence &other)
 	std::vector<PATTERNINDEX>::assign(other.begin(), other.end());
 	m_name = other.m_name;
 	m_restartPos = other.m_restartPos;
+	m_defaultTempo = other.m_defaultTempo;
+	m_defaultSpeed = other.m_defaultSpeed;
 	return *this;
 }
 
@@ -41,7 +43,9 @@ bool ModSequence::operator== (const ModSequence &other) const noexcept
 {
 	return static_cast<const std::vector<PATTERNINDEX> &>(*this) == other
 		&& m_name == other.m_name
-		&& m_restartPos == other.m_restartPos;
+		&& m_restartPos == other.m_restartPos
+		&& m_defaultTempo == other.m_defaultTempo
+		&& m_defaultSpeed == other.m_defaultSpeed;
 }
 
 
@@ -240,7 +244,7 @@ ORDERINDEX ModSequence::insert(ORDERINDEX pos, ORDERINDEX count, PATTERNINDEX fi
 
 ORDERINDEX ModSequence::insert(ORDERINDEX pos, const mpt::span<const PATTERNINDEX> orders, bool enforceFormatLimits)
 {
-	MPT_ASSERT(reinterpret_cast<uintptr_t>(orders.data()) < reinterpret_cast<uintptr_t>(data()) || reinterpret_cast<uintptr_t>(orders.data()) > reinterpret_cast<uintptr_t>(data() + size()));
+	MPT_ASSERT(mpt::pointer_cast<std::uintptr_t>(orders.data()) < mpt::pointer_cast<std::uintptr_t>(data()) || mpt::pointer_cast<std::uintptr_t>(orders.data()) > mpt::pointer_cast<std::uintptr_t>(data() + size()));
 	ORDERINDEX count = insert(pos, mpt::saturate_cast<ORDERINDEX>(orders.size()), 0, enforceFormatLimits);
 	std::copy(orders.begin(), orders.begin() + count, begin() + pos);
 	return count;

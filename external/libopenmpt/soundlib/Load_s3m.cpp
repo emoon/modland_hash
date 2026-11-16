@@ -569,7 +569,8 @@ bool CSoundFile::ReadS3M(FileReader &file, ModLoadingFlags loadFlags)
 		}
 
 		sampleHeader.ConvertToMPT(Samples[smp + 1], isST3);
-		m_szNames[smp + 1] = mpt::String::ReadBuf(mpt::String::nullTerminated, sampleHeader.name);
+		// Old ModPlug Tracker allowed to write into the last byte reserved for the null terminator
+		m_szNames[smp + 1] = mpt::String::ReadBuf(mpt::String::maybeNullTerminated, sampleHeader.name);
 
 		if(sampleHeader.sampleType < S3MSampleHeader::typeAdMel)
 		{
@@ -858,7 +859,7 @@ bool CSoundFile::SaveS3M(std::ostream &f) const
 	if(const auto modDoc = GetpModDoc(); modDoc != nullptr)
 	{
 		auto creationTime = modDoc->GetCreationTime();
-		editTimer += mpt::saturate_round<uint64>((mpt::Date::UnixAsSeconds(mpt::Date::UnixNow()) - mpt::Date::UnixAsSeconds(creationTime)) * HISTORY_TIMER_PRECISION);
+		editTimer += mpt::saturate_round<uint64>((mpt::chrono::default_system_clock::to_unix_seconds(mpt::chrono::default_system_clock::now()) - mpt::chrono::default_system_clock::to_unix_seconds(creationTime)) * HISTORY_TIMER_PRECISION);
 	}
 #endif  // MODPLUG_TRACKER
 	fileHeader.reserved3 = mpt::saturate_cast<uint32>(editTimer);

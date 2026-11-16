@@ -8,8 +8,6 @@
  */
 
 
-#ifndef NO_PLUGINS
-
 #include "PlugInterface.h"
 
 OPENMPT_NAMESPACE_BEGIN
@@ -120,6 +118,6 @@ protected:
 	void RecalculateEchoParams();
 };
 
-OPENMPT_NAMESPACE_END
+MPT_BINARY_STRUCT(DigiBoosterEcho::PluginChunk, 8)
 
-#endif // NO_PLUGINS
+OPENMPT_NAMESPACE_END

@@ -256,7 +256,7 @@ struct SymVirtualInst
 				if(chn.position.GetUInt() >= chn.nLength)
 					chn.pCurrentSample = nullptr;
 			}
-			CopySample<SC::ConversionChain<SC::ConvertFixedPoint<int16, mixsample_t, 27>, SC::DecodeIdentity<mixsample_t>>>(target.sample16() + writeOffset, writeCount, 1, buffer.data(), sizeof(buffer), 2);
+			CopySample<SC::ConvertFixedPoint<int16, mixsample_t, 27>>(target.sample16() + writeOffset, writeCount, 1, buffer.data(), sizeof(buffer), 2);
 			writeOffset += writeCount;
 		}
 
@@ -328,7 +328,7 @@ struct SymTranswaveInst
 		return true;
 	}
 
-	static MPT_FORCEINLINE double TranswaveInterpolate(const ModSample &smp, double offset)
+	MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE static double TranswaveInterpolate(const ModSample &smp, double offset)
 	{
 		if(!smp.HasSampleData())
 			return 0.0;
@@ -507,7 +507,7 @@ struct SymInstrument
 			int16 *newSample = static_cast<int16 *>(ModSample::AllocateSample(mptSmp.nLength, 2 * mptSmp.GetNumChannels()));
 			if(!newSample)
 				return;
-			CopySample<SC::ConversionChain<SC::Convert<int16, int8>, SC::DecodeIdentity<int8>>>(newSample, mptSmp.nLength * mptSmp.GetNumChannels(), 1, mptSmp.sample8(), mptSmp.GetSampleSizeInBytes(), 1);
+			CopySample<SC::Convert<int16, int8>>(newSample, mptSmp.nLength * mptSmp.GetNumChannels(), 1, mptSmp.sample8(), mptSmp.GetSampleSizeInBytes(), 1);
 			mptSmp.uFlags.set(CHN_16BIT);
 			mptSmp.ReplaceWaveform(newSample, mptSmp.nLength, sndFile);
 		}
@@ -1660,10 +1660,8 @@ bool CSoundFile::ReadSymMOD(FileReader &file, ModLoadingFlags loadFlags)
 
 							// DSP effects
 						case SymEvent::Filter:
-#ifndef NO_PLUGINS
 						case SymEvent::DSPEcho:
 						case SymEvent::DSPDelay:
-#endif
 							if(auto it = macroMap.find(event); it != macroMap.end() && it->second != 0)
 							{
 								m.SetEffectCommand(CMD_MIDI, it->second);
@@ -1908,7 +1906,6 @@ bool CSoundFile::ReadSymMOD(FileReader &file, ModLoadingFlags loadFlags)
 		}
 	}
 
-#ifndef NO_PLUGINS
 	if(useDSP)
 	{
 		SNDMIXPLUGIN &plugin = m_MixPlugins[0];
@@ -1926,7 +1923,6 @@ bool CSoundFile::ReadSymMOD(FileReader &file, ModLoadingFlags loadFlags)
 
 		m_MixPlugins[1].Info.szName = "No Echo";
 	}
-#endif // NO_PLUGINS
 
 	// Channel panning
 	for(CHANNELINDEX chn = 0; chn < GetNumChannels(); chn++)

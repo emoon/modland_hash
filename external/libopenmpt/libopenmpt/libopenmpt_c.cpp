@@ -37,11 +37,19 @@
 namespace openmpt {
 
 static const char * strdup( const char * src ) {
-	char * dst = (char*)std::calloc( std::strlen( src ) + 1, sizeof( char ) );
+	std::size_t len = std::strlen( src );
+	char * dst = (char*)std::calloc( len + 1, sizeof( char ) );
 	if ( !dst ) {
 		return NULL;
 	}
-	std::strcpy( dst, src );
+	// GCC hates passing std::strlen() to std::strncpy().
+	// OpenBSD hates strcpy(), and demands BSD-proprietary strlcpy() instead.
+	// Just open code the raw loop so that stupid idiotic moronic compilers just SHUT THE FUCK UP.
+	// That must surely be the best solution possible which everyone will like, right? Right?
+	for ( std::size_t i = 0; i < len; ++i ) {
+		dst[ i ] = src[ i ];
+	}
+	dst[ len ] = '\0';
 	return dst;
 }
 
@@ -1006,6 +1014,15 @@ double openmpt_module_get_current_tempo2( openmpt_module * mod ) {
 	try {
 		openmpt::interface::check_soundfile( mod );
 		return mod->impl->get_current_tempo2();
+	} catch ( ... ) {
+		openmpt::report_exception( __func__, mod );
+	}
+	return 0;
+}
+int32_t openmpt_module_get_current_sequence( openmpt_module * mod ) {
+	try {
+		openmpt::interface::check_soundfile( mod );
+		return mod->impl->get_current_sequence();
 	} catch ( ... ) {
 		openmpt::report_exception( __func__, mod );
 	}

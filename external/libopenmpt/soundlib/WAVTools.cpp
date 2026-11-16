@@ -70,7 +70,8 @@ WAVReader::WAVReader(FileReader &inputFile) : file(inputFile)
 
 	// Read format chunk
 	FileReader formatChunk = chunks.GetChunk(RIFFChunk::idfmt_);
-	if(!formatChunk.ReadStruct(formatInfo))
+	if(!formatChunk.ReadStruct(formatInfo)
+		|| formatInfo.numChannels == 0)
 	{
 		return;
 	}
@@ -104,8 +105,29 @@ WAVReader::WAVReader(FileReader &inputFile) : file(inputFile)
 		sampleData = chunks.GetChunk(RIFFChunk::idpcm_);
 	}
 
-	// "fact" chunk should contain sample length of compressed samples.
-	sampleLength = chunks.GetChunk(RIFFChunk::idfact).ReadUint32LE();
+	sampleLength = 0;
+	if((formatInfo.format == WAVFormatChunk::fmtIMA_ADPCM) && (GetBlockAlign() >= 4 * formatInfo.numChannels))
+	{
+		// "fact" chunk should contain sample length of compressed samples.
+		sampleLength = chunks.GetChunk(RIFFChunk::idfact).ReadUint32LE();
+
+		FileReader::pos_type dataLength = sampleData.GetLength();
+		std::size_t blocks = mpt::align_up<FileReader::pos_type>(dataLength, GetBlockAlign()) / GetBlockAlign();
+		std::size_t framesPerBlock = ((GetBlockAlign() - (4 * formatInfo.numChannels)) * 2 / formatInfo.numChannels) + 1;
+		FileReader::pos_type expectedLengthFrames = blocks * framesPerBlock;
+		if(sampleLength == 0)
+		{
+			sampleLength = expectedLengthFrames;
+		} else if((sampleLength > 0) && (formatInfo.numChannels == 2))
+		{
+			// libsndfile divides the sample length by 2 for stereo samples (it gets confused about frames vs samples)
+			if((sampleLength * 2) <= expectedLengthFrames)
+			{
+				sampleLength *= 2;
+			}
+		}
+		LimitMax(sampleLength, expectedLengthFrames);
+	}
 
 	if((formatInfo.format != WAVFormatChunk::fmtIMA_ADPCM || sampleLength == 0) && GetSampleSize() != 0)
 	{

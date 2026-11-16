@@ -184,19 +184,23 @@ uint32 ModSample::GetSampleRate(const MODTYPE type) const
 
 
 // Copies sample data from another sample slot and ensures that the 16-bit/stereo flags are set accordingly.
-bool ModSample::CopyWaveform(const ModSample &smpFrom)
+bool ModSample::CopyWaveform(const ModSample &smpFrom, SmpLength start, SmpLength end)
 {
-	if(!smpFrom.HasSampleData())
+	LimitMax(start, smpFrom.nLength);
+	LimitMax(end, smpFrom.nLength);
+	if(!smpFrom.HasSampleData() || start >= end)
 		return false;
 	// If we duplicate a sample slot, avoid deleting the sample we just copy from
 	if(smpFrom.sampleb() == sampleb())
 		pData.pSample = nullptr;
-	LimitMax(nLength, smpFrom.nLength);
+	LimitMax(nLength, end - start);
+
 	uFlags.set(CHN_16BIT, smpFrom.uFlags[CHN_16BIT]);
 	uFlags.set(CHN_STEREO, smpFrom.uFlags[CHN_STEREO]);
 	if(AllocateSample())
 	{
-		memcpy(sampleb(), smpFrom.sampleb(), GetSampleSizeInBytes());
+		const auto bps = smpFrom.GetBytesPerSample();
+		std::copy(smpFrom.sampleb() + start * bps, smpFrom.sampleb() + (start + nLength) * bps, sampleb());
 		return true;
 	}
 	return false;
@@ -207,17 +211,10 @@ bool ModSample::CopyWaveform(const ModSample &smpFrom)
 void ModSample::ReplaceWaveform(void *newWaveform, const SmpLength newLength, CSoundFile &sndFile)
 {
 	auto oldWaveform = samplev();
-	FlagSet<ChannelFlags> setFlags, resetFlags;
-
-	setFlags.set(CHN_16BIT, uFlags[CHN_16BIT]);
-	resetFlags.set(CHN_16BIT, !uFlags[CHN_16BIT]);
-
-	setFlags.set(CHN_STEREO, uFlags[CHN_STEREO]);
-	resetFlags.set(CHN_STEREO, !uFlags[CHN_STEREO]);
 
 	CriticalSection cs;
 
-	ctrlChn::ReplaceSample(sndFile, *this, newWaveform, newLength, setFlags, resetFlags);
+	ctrlChn::ReplaceSample(sndFile, *this, newWaveform, newLength);
 	pData.pSample = newWaveform;
 	nLength = newLength;
 	FreeSample(oldWaveform);

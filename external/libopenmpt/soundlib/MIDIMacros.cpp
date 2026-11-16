@@ -171,7 +171,6 @@ CString MIDIMacroConfig::GetParameteredMacroName(uint32 macroIndex, IMixPlugin *
 			const int param = MacroToPlugParam(macroIndex);
 			CString formattedName;
 			formattedName.Format(_T("Param %d"), param);
-#ifndef NO_PLUGINS
 			if(plugin != nullptr)
 			{
 				CString paramName = plugin->GetParamName(param);
@@ -180,9 +179,6 @@ CString MIDIMacroConfig::GetParameteredMacroName(uint32 macroIndex, IMixPlugin *
 					formattedName += _T(" (") + paramName + _T(")");
 				}
 			} else
-#else
-			MPT_UNREFERENCED_PARAMETER(plugin);
-#endif // NO_PLUGINS
 			{
 				formattedName += _T(" (N/A)");
 			}
@@ -357,8 +353,8 @@ std::string MIDIMacroConfig::Macro::NormalizedString() const
 {
 	std::string sanitizedMacro = *this;
 
-	std::string::size_type pos;
-	while((pos = sanitizedMacro.find_first_not_of("0123456789ABCDEFabchmnopsuvxyz")) != std::string::npos)
+	std::string::size_type pos = 0;
+	while((pos = sanitizedMacro.find_first_not_of("0123456789ABCDEFabchmnopsuvxyz", pos)) != std::string::npos)
 	{
 		sanitizedMacro.erase(pos, 1);
 	}

@@ -10,18 +10,15 @@
 
 #include "stdafx.h"
 
-#ifndef NO_PLUGINS
 #include "I3DL2Reverb.h"
 #include "../../Sndfile.h"
 #ifdef MODPLUG_TRACKER
 #include "../../../sounddsp/Reverb.h"
 #endif // MODPLUG_TRACKER
 #include "mpt/base/numbers.hpp"
-#endif // !NO_PLUGINS
 
 OPENMPT_NAMESPACE_BEGIN
 
-#ifndef NO_PLUGINS
 
 namespace DMO
 {
@@ -51,7 +48,7 @@ void I3DL2Reverb::DelayLine::Advance()
 }
 
 
-MPT_FORCEINLINE void I3DL2Reverb::DelayLine::Set(float value)
+MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE void I3DL2Reverb::DelayLine::Set(float value)
 {
 	at(m_position) = value;
 }
@@ -66,7 +63,7 @@ float I3DL2Reverb::DelayLine::Get(int32 offset) const
 }
 
 
-MPT_FORCEINLINE float I3DL2Reverb::DelayLine::Get() const
+MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE float I3DL2Reverb::DelayLine::Get() const
 {
 	return at(m_delayPosition);
 }
@@ -636,9 +633,5 @@ float I3DL2Reverb::CalcDecayCoeffs(int32 index)
 
 } // namespace DMO
 
-#else
-MPT_MSVC_WORKAROUND_LNK4221(I3DL2Reverb)
-
-#endif // !NO_PLUGINS
 
 OPENMPT_NAMESPACE_END

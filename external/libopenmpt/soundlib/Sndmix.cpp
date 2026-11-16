@@ -18,9 +18,7 @@
 #ifdef MODPLUG_TRACKER
 #include "../mptrack/TrackerSettings.h"
 #endif // MODPLUG_TRACKER
-#ifndef NO_PLUGINS
 #include "plugins/PlugInterface.h"
-#endif // NO_PLUGINS
 #include "OPL.h"
 
 OPENMPT_NAMESPACE_BEGIN
@@ -315,12 +313,10 @@ samplecount_t CSoundFile::Read(samplecount_t count, IAudioTarget &target, IAudio
 		m_Reverb.Process(MixSoundBuffer, ReverbSendBuffer, m_RvbROfsVol, m_RvbLOfsVol, countChunk);
 #endif  // NO_REVERB
 
-#ifndef NO_PLUGINS
 		if(m_loadedPlugins)
 		{
 			ProcessPlugins(countChunk);
 		}
-#endif  // NO_PLUGINS
 
 		if(m_MixerSettings.gnChannels == 1)
 		{
@@ -1050,7 +1046,6 @@ void CSoundFile::ProcessTremor(CHANNELINDEX nChn, int &vol)
 		chn.dwFlags.set(CHN_FASTVOLRAMP);
 	}
 
-#ifndef NO_PLUGINS
 	// Plugin tremor
 	if(chn.nCommand == CMD_TREMOR && chn.pModInstrument && chn.pModInstrument->nMixPlug
 		&& !chn.pModInstrument->dwFlags[INS_MUTE]
@@ -1068,7 +1063,6 @@ void CSoundFile::ProcessTremor(CHANNELINDEX nChn, int &vol)
 				pPlugin->MidiCommand(*pIns, chn.nLastNote, static_cast<uint16>(chn.nVolume), nChn);
 		}
 	}
-#endif // NO_PLUGINS
 }
 
 
@@ -1176,7 +1170,12 @@ int CSoundFile::ProcessPitchFilterEnvelope(ModChannel &chn, int32 &period) const
 		if(m_playBehaviour[kITEnvelopePositionHandling] && chn.PitchEnv.nEnvPosition == 0)
 		{
 			// If the envelope is disabled at the very same moment as it is triggered, we do not process anything.
-			return -1;
+			// However, Impulse Tracker still applies the filter settings as if the envelope was at its midway.
+			// Test case: S7B_StillAppliesFilter.it
+			if(m_playBehaviour[kITStoppedFilterEnvAtStart] && chn.PitchEnv.flags[ENV_FILTER])
+				return SetupChannelFilter(chn, !chn.dwFlags[CHN_FILTER], 0);
+			else
+				return -1;
 		}
 
 		const int envpos = chn.PitchEnv.nEnvPosition - (m_playBehaviour[kITEnvelopePositionHandling] ? 1 : 0);
@@ -1450,7 +1449,6 @@ void CSoundFile::ProcessArpeggio(CHANNELINDEX nChn, int32 &period, Tuning::NOTEI
 {
 	ModChannel &chn = m_PlayState.Chn[nChn];
 
-#ifndef NO_PLUGINS
 	// Plugin arpeggio
 	if(chn.pModInstrument && chn.pModInstrument->nMixPlug
 		&& !chn.pModInstrument->dwFlags[INS_MUTE]
@@ -1501,7 +1499,6 @@ void CSoundFile::ProcessArpeggio(CHANNELINDEX nChn, int32 &period, Tuning::NOTEI
 				chn.nArpeggioLastNote = NOTE_NONE;
 		}
 	}
-#endif // NO_PLUGINS
 
 	if(chn.nCommand == CMD_ARPEGGIO)
 	{
@@ -1614,7 +1611,7 @@ void CSoundFile::ProcessArpeggio(CHANNELINDEX nChn, int32 &period, Tuning::NOTEI
 						// Test case: ArpWraparound.mod, and the snare sound in "Jim is dead" by doh.
 						if(note == NOTE_MIDDLEC + 24)
 						{
-							period = int32_max;
+							period = 65536;  // Period 0 is treated as period 65536 by the Paula chip
 							return;
 						} else if(note > NOTE_MIDDLEC + 24)
 						{
@@ -1735,7 +1732,6 @@ void CSoundFile::ProcessVibrato(CHANNELINDEX nChn, int32 &period, Tuning::RATIOT
 			DoFreqSlide(chn, period, vdelta);
 
 			// Process MIDI vibrato for plugins:
-#ifndef NO_PLUGINS
 			IMixPlugin *plugin = GetChannelInstrumentPlugin(m_PlayState.Chn[nChn]);
 			if(plugin != nullptr)
 			{
@@ -1748,7 +1744,6 @@ void CSoundFile::ProcessVibrato(CHANNELINDEX nChn, int32 &period, Tuning::RATIOT
 				}
 				plugin->MidiVibrato(vdelta, pwd, nChn);
 			}
-#endif // NO_PLUGINS
 		}
 
 		// Advance vibrato position - IT updates on every tick, unless "old effects" are enabled (in this case it only updates on non-first ticks like other trackers)
@@ -1758,13 +1753,11 @@ void CSoundFile::ProcessVibrato(CHANNELINDEX nChn, int32 &period, Tuning::RATIOT
 	} else if(chn.dwOldFlags[CHN_VIBRATO])
 	{
 		// Stop MIDI vibrato for plugins:
-#ifndef NO_PLUGINS
 		IMixPlugin *plugin = GetChannelInstrumentPlugin(m_PlayState.Chn[nChn]);
 		if(plugin != nullptr)
 		{
 			plugin->MidiVibrato(0, 0, nChn);
 		}
-#endif // NO_PLUGINS
 	}
 }
 
@@ -2171,14 +2164,6 @@ bool CSoundFile::ReadNote()
 	for(CHANNELINDEX nChn = 0; nChn < m_PlayState.Chn.size(); nChn++)
 	{
 		ModChannel &chn = m_PlayState.Chn[nChn];
-		// FT2 Compatibility: Prevent notes to be stopped after a fadeout. This way, a portamento effect can pick up a faded instrument which is long enough.
-		// This occurs for example in the bassline (channel 11) of jt_burn.xm. I hope this won't break anything else...
-		// I also suppose this could decrease mixing performance a bit, but hey, which CPU can't handle 32 muted channels these days... :-)
-		if(chn.dwFlags[CHN_NOTEFADE] && (!(chn.nFadeOutVol|chn.leftVol|chn.rightVol)) && !m_playBehaviour[kFT2ProcessSilentChannels])
-		{
-			chn.nLength = 0;
-			chn.nROfs = chn.nLOfs = 0;
-		}
 		// Increment age of NNA channels
 		if(chn.nMasterChn && nChn < GetNumChannels() && chn.nnaChannelAge < Util::MaxValueOfType(chn.nnaChannelAge))
 			chn.nnaChannelAge++;
@@ -2472,6 +2457,18 @@ bool CSoundFile::ReadNote()
 			IncrementEnvelopePositions(chn);
 		}
 
+		// FT2 Compatibility: Prevent notes to be stopped after a fadeout. This way, a portamento effect can pick up a faded instrument which is long enough.
+		// This occurs for example in the bassline (channel 11) of jt_burn.xm.
+		// Test case: FadeoutPickup.xm
+		// NB: This check used to be right at the top of the loop, but was moved down here to match the channel stop behaviour
+		// of Impulse Tracker for the kITCompatGxxCarryPortaWithIns play behaviour.
+		// Test case: CarryCompatGxxPortaWithIns.it
+		if(chn.dwFlags[CHN_NOTEFADE] && (!(chn.nFadeOutVol | chn.leftVol | chn.rightVol)) && !m_playBehaviour[kFT2ProcessSilentChannels])
+		{
+			chn.nLength = 0;
+			chn.nROfs = chn.nLOfs = 0;
+		}
+
 		// Volume ramping
 		chn.dwFlags.set(CHN_VOLUMERAMP, (chn.nRealVolume | chn.rightVol | chn.leftVol) != 0 && !chn.dwFlags[CHN_ADLIB]);
 
@@ -2596,6 +2593,12 @@ bool CSoundFile::ReadNote()
 			{
 				m_PlayState.ChnMix[m_nMixChannels++] = nChn;
 			}
+
+			// Stop NNA channel processing if the channel is effectively muted.
+			// Required for Carry Envelope quirk to stop processing envelopes of affected channels.
+			// Test case: CarryCompatGxxPortaWithIns.it
+			if(nChn >= GetNumChannels() && !(chn.nVolume && chn.nGlobalVol && chn.nInsVol))
+				chn.nLength = 0;
 		} else
 		{
 			chn.rightVol = chn.leftVol = 0;
@@ -2638,8 +2641,6 @@ void CSoundFile::ProcessMacroOnChannel(CHANNELINDEX nChn)
 	}
 }
 
-
-#ifndef NO_PLUGINS
 
 void CSoundFile::ProcessMidiOut(CHANNELINDEX nChn)
 {
@@ -2746,11 +2747,9 @@ void CSoundFile::ProcessMidiOut(CHANNELINDEX nChn)
 	}
 }
 
-#endif // NO_PLUGINS
-
 
 template<int channels>
-MPT_FORCEINLINE void ApplyGlobalVolumeWithRamping(int32 *SoundBuffer, int32 *RearBuffer, uint32 lCount, int32 m_nGlobalVolume, int32 step, int32 &m_nSamplesToGlobalVolRampDest, int32 &m_lHighResRampingGlobalVolume)
+MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE void ApplyGlobalVolumeWithRamping(int32 *SoundBuffer, int32 *RearBuffer, uint32 lCount, int32 m_nGlobalVolume, int32 step, int32 &m_nSamplesToGlobalVolRampDest, int32 &m_lHighResRampingGlobalVolume)
 {
 	const bool isStereo = (channels >= 2);
 	const bool hasRear = (channels >= 4);

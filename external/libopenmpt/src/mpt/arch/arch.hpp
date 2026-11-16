@@ -4,6 +4,7 @@
 #define MPT_ARCH_ARCH_HPP
 
 
+#include "mpt/arch/feature_fence.hpp"
 #include "mpt/arch/feature_flags.hpp"
 #include "mpt/arch/x86_amd64.hpp"
 #include "mpt/base/detect.hpp"
@@ -86,33 +87,37 @@ inline constexpr mode_flags none = mode_flags{};
 
 struct cpu_info {
 public:
+	[[nodiscard]] MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE static cpu_info query() noexcept {
+		return cpu_info{};
+	}
+private:
 	cpu_info() = default;
 public:
-	MPT_CONSTEXPRINLINE bool operator[](feature_flags) const noexcept {
+	MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE constexpr bool operator[](feature_flags) const noexcept {
 		return true;
 	}
-	MPT_CONSTEXPRINLINE bool has_features(feature_flags) const noexcept {
+	MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE constexpr bool has_features(feature_flags) const noexcept {
 		return true;
 	}
-	MPT_CONSTEXPRINLINE feature_flags get_features() const noexcept {
+	MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE constexpr feature_flags get_features() const noexcept {
 		return {};
 	}
-	MPT_CONSTEXPRINLINE bool operator[](mode_flags) const noexcept {
+	MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE constexpr bool operator[](mode_flags) const noexcept {
 		return true;
 	}
-	MPT_CONSTEXPRINLINE bool enabled_modes(mode_flags) const noexcept {
+	MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE constexpr bool enabled_modes(mode_flags) const noexcept {
 		return true;
 	}
-	MPT_CONSTEXPRINLINE mode_flags get_modes() const noexcept {
+	MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE constexpr mode_flags get_modes() const noexcept {
 		return {};
 	}
 };
 
-[[nodiscard]] MPT_CONSTEVAL feature_flags assumed_features() noexcept {
+[[nodiscard]] MPT_ATTR_ALWAYSINLINE MPT_CONSTEVAL feature_flags assumed_features() noexcept {
 	return {};
 }
 
-[[nodiscard]] MPT_CONSTEVAL mode_flags assumed_modes() noexcept {
+[[nodiscard]] MPT_ATTR_ALWAYSINLINE MPT_CONSTEVAL mode_flags assumed_modes() noexcept {
 	return {};
 }
 
@@ -130,52 +135,30 @@ namespace current = unknown;
 
 using cpu_info = mpt::arch::current::cpu_info;
 
-inline const cpu_info & get_cpu_info() {
-	static cpu_info info;
+MPT_ATTR_NOINLINE MPT_DECL_NOINLINE inline const cpu_info & get_cpu_info() {
+	static cpu_info info = cpu_info::query();
 	return info;
 }
 
 namespace detail {
 
 struct info_initializer {
-	inline info_initializer() noexcept {
+	MPT_ATTR_NOINLINE MPT_DECL_NOINLINE inline info_initializer() noexcept {
 		get_cpu_info();
 	}
 };
 
+#if MPT_COMPILER_CLANG
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wglobal-constructors"
+#endif // MPT_COMPILER_CLANG
 inline info_initializer g_info_initializer;
+#if MPT_COMPILER_CLANG
+#pragma clang diagnostic pop
+#endif // MPT_COMPILER_CLANG
+
 
 } // namespace detail
-
-struct flags_cache {
-private:
-	const mpt::arch::current::feature_flags Features;
-	const mpt::arch::current::mode_flags Modes;
-public:
-	MPT_CONSTEXPRINLINE flags_cache(const mpt::arch::cpu_info & info) noexcept
-		: Features(info.get_features())
-		, Modes(info.get_modes()) {
-		return;
-	}
-	[[nodiscard]] MPT_CONSTEXPRINLINE bool operator[](mpt::arch::current::feature_flags query_features) const noexcept {
-		return ((Features & query_features) == query_features);
-	}
-	[[nodiscard]] MPT_CONSTEXPRINLINE bool has_features(mpt::arch::current::feature_flags query_features) const noexcept {
-		return ((Features & query_features) == query_features);
-	}
-	[[nodiscard]] MPT_CONSTEXPRINLINE mpt::arch::current::feature_flags get_features() const noexcept {
-		return Features;
-	}
-	[[nodiscard]] MPT_CONSTEXPRINLINE bool operator[](mpt::arch::current::mode_flags query_modes) const noexcept {
-		return ((Modes & query_modes) == query_modes);
-	}
-	[[nodiscard]] MPT_CONSTEXPRINLINE bool has_features(mpt::arch::current::mode_flags query_modes) const noexcept {
-		return ((Modes & query_modes) == query_modes);
-	}
-	[[nodiscard]] MPT_CONSTEXPRINLINE mpt::arch::current::mode_flags get_modes() const noexcept {
-		return Modes;
-	}
-};
 
 
 

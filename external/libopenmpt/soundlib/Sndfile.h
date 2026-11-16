@@ -74,9 +74,7 @@ uintptr_t DMFUnpack(FileReader &file, uint8 *psample, uint32 maxlen);
 
 
 #ifdef LIBOPENMPT_BUILD
-#ifndef NO_PLUGINS
 class CVstPluginManager;
-#endif
 #endif
 
 
@@ -526,10 +524,8 @@ public:
 	ModInstrument *Instruments[MAX_INSTRUMENTS];  // Instrument Headers
 	InstrumentSynth::Events m_globalScript;
 	MIDIMacroConfig m_MidiCfg;                    // MIDI Macro config table
-#ifndef NO_PLUGINS
 	std::array<SNDMIXPLUGIN, MAX_MIXPLUGINS> m_MixPlugins;  // Mix plugins
 	uint32 m_loadedPlugins = 0;                             // Not a PLUGINDEX because number of loaded plugins may exceed MAX_MIXPLUGINS during MIDI conversion
-#endif
 	mpt::charbuf<MAX_SAMPLENAME> m_szNames[MAX_SAMPLES];  // Sample names
 
 	Version m_dwCreatedWithVersion;
@@ -575,7 +571,7 @@ private:
 #endif // MODPLUG_TRACKER
 
 public:
-#if defined(LIBOPENMPT_BUILD) && !defined(NO_PLUGINS)
+#if defined(LIBOPENMPT_BUILD)
 	std::unique_ptr<CVstPluginManager> m_PluginManager;
 #endif
 
@@ -715,14 +711,12 @@ public:
 	constexpr SAMPLEINDEX GetNumSamples() const noexcept { return m_nSamples; }
 	constexpr PATTERNINDEX GetCurrentPattern() const noexcept { return m_PlayState.m_nPattern; }
 	constexpr ORDERINDEX GetCurrentOrder() const noexcept { return m_PlayState.m_nCurrentOrder; }
-	MPT_FORCEINLINE CHANNELINDEX GetNumChannels() const noexcept { return static_cast<CHANNELINDEX>(ChnSettings.size()); }
+	MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE CHANNELINDEX GetNumChannels() const noexcept { return static_cast<CHANNELINDEX>(ChnSettings.size()); }
 
 	constexpr bool CanAddMoreSamples(SAMPLEINDEX amount = 1) const noexcept { return (amount < MAX_SAMPLES) && m_nSamples < (MAX_SAMPLES - amount); }
 	constexpr bool CanAddMoreInstruments(INSTRUMENTINDEX amount = 1) const noexcept { return (amount < MAX_INSTRUMENTS) && m_nInstruments < (MAX_INSTRUMENTS - amount); }
 
-#ifndef NO_PLUGINS
 	IMixPlugin* GetInstrumentPlugin(INSTRUMENTINDEX instr) const noexcept;
-#endif
 	const CModSpecifications& GetModSpecifications() const {return *m_pModSpecs;}
 	static const CModSpecifications& GetModSpecifications(const MODTYPE type);
 
@@ -832,6 +826,7 @@ public:
 	static ProbeResult ProbeFileHeaderMOD(MemoryFileReader file, const uint64 *pfilesize);
 	static ProbeResult ProbeFileHeaderMT2(MemoryFileReader file, const uint64 *pfilesize);
 	static ProbeResult ProbeFileHeaderMTM(MemoryFileReader file, const uint64 *pfilesize);
+	static ProbeResult ProbeFileHeaderNRU(MemoryFileReader file, const uint64 *pfilesize);
 	static ProbeResult ProbeFileHeaderOKT(MemoryFileReader file, const uint64 *pfilesize);
 	static ProbeResult ProbeFileHeaderPLM(MemoryFileReader file, const uint64 *pfilesize);
 	static ProbeResult ProbeFileHeaderPSM(MemoryFileReader file, const uint64 *pfilesize);
@@ -842,6 +837,7 @@ public:
 	static ProbeResult ProbeFileHeaderRTM(MemoryFileReader file, const uint64 *pfilesize);
 	static ProbeResult ProbeFileHeaderS3M(MemoryFileReader file, const uint64 *pfilesize);
 	static ProbeResult ProbeFileHeaderSFX(MemoryFileReader file, const uint64 *pfilesize);
+	static ProbeResult ProbeFileHeaderSS(MemoryFileReader file, const uint64 *pfilesize);
 	static ProbeResult ProbeFileHeaderSTM(MemoryFileReader file, const uint64 *pfilesize);
 	static ProbeResult ProbeFileHeaderSTP(MemoryFileReader file, const uint64 *pfilesize);
 	static ProbeResult ProbeFileHeaderSTX(MemoryFileReader file, const uint64 *pfilesize);
@@ -897,6 +893,7 @@ public:
 	bool ReadMOD(FileReader &file, ModLoadingFlags loadFlags = loadCompleteModule);
 	bool ReadMT2(FileReader &file, ModLoadingFlags loadFlags = loadCompleteModule);
 	bool ReadMTM(FileReader &file, ModLoadingFlags loadFlags = loadCompleteModule);
+	bool ReadNRU(FileReader &file, ModLoadingFlags loadFlags = loadCompleteModule);
 	bool ReadOKT(FileReader &file, ModLoadingFlags loadFlags = loadCompleteModule);
 	bool ReadPLM(FileReader &file, ModLoadingFlags loadFlags = loadCompleteModule);
 	bool ReadPSM(FileReader &file, ModLoadingFlags loadFlags = loadCompleteModule);
@@ -907,6 +904,7 @@ public:
 	bool ReadRTM(FileReader &file, ModLoadingFlags loadFlags = loadCompleteModule);
 	bool ReadS3M(FileReader &file, ModLoadingFlags loadFlags = loadCompleteModule);
 	bool ReadSFX(FileReader &file, ModLoadingFlags loadFlags = loadCompleteModule);
+	bool ReadSS(FileReader &file, ModLoadingFlags loadFlags = loadCompleteModule);
 	bool ReadSTM(FileReader &file, ModLoadingFlags loadFlags = loadCompleteModule);
 	bool ReadSTP(FileReader &file, ModLoadingFlags loadFlags = loadCompleteModule);
 	bool ReadSTX(FileReader &file, ModLoadingFlags loadFlags = loadCompleteModule);
@@ -989,6 +987,7 @@ public:
 private:
 	void CreateStereoMix(int count);
 	bool MixChannel(int count, ModChannel &chn, CHANNELINDEX channel, bool doMix);
+	std::pair<mixsample_t *, mixsample_t *> GetChannelOffsets(const ModChannel &chn, CHANNELINDEX channel);
 public:
 	bool FadeSong(uint32 msec);
 private:
@@ -1023,7 +1022,7 @@ public:
 	CHANNELINDEX CheckNNA(CHANNELINDEX nChn, uint32 instr, int note, bool forceCut);
 	void StopOldNNA(ModChannel &chn, CHANNELINDEX channel);
 	void NoteChange(ModChannel &chn, int note, bool bPorta = false, bool bResetEnv = true, bool bManual = false, CHANNELINDEX channelHint = CHANNELINDEX_INVALID) const;
-	void InstrumentChange(ModChannel &chn, uint32 instr, bool bPorta = false, bool bUpdVol = true, bool bResetEnv = true) const;
+	void InstrumentChange(PlayState &playState, CHANNELINDEX channel, uint32 instr, bool bPorta = false, bool bUpdVol = true, bool bResetEnv = true) const;
 	void ApplyInstrumentPanning(ModChannel &chn, const ModInstrument *instr, const ModSample *smp) const;
 	uint32 CalculateXParam(PATTERNINDEX pat, ROWINDEX row, CHANNELINDEX chn, uint32 *extendedRows = nullptr) const;
 
@@ -1109,7 +1108,7 @@ protected:
 	void FineVibrato(ModChannel &chn, uint32 param) const;
 	void AutoVolumeSlide(ModChannel &chn, ModCommand::PARAM param) const;
 	void VolumeDownETX(const PlayState &playState, ModChannel &chn, ModCommand::PARAM param) const;
-	void VolumeSlide(ModChannel &chn, ModCommand::PARAM param) const;
+	void VolumeSlide(ModChannel &chn, ModCommand::PARAM param, bool volCol = false) const;
 	void PanningSlide(ModChannel &chn, ModCommand::PARAM param, bool memory = true) const;
 	void ChannelVolSlide(ModChannel &chn, ModCommand::PARAM param) const;
 	void ChannelVolumeDownWithDuration(ModChannel &chn, uint16 param = uint16_max) const;
@@ -1230,13 +1229,13 @@ public:
 #ifdef MODPLUG_TRACKER
 	static std::vector<FileType> GetMediaFoundationFileTypes();
 #endif // MODPLUG_TRACKER
-//#ifndef MODPLUG_NO_FILESAVE
+#ifndef MODPLUG_NO_FILESAVE
 	bool SaveWAVSample(SAMPLEINDEX nSample, std::ostream &f) const;
 	bool SaveRAWSample(SAMPLEINDEX nSample, std::ostream &f) const;
 	bool SaveFLACSample(SAMPLEINDEX nSample, std::ostream &f) const;
 	bool SaveS3ISample(SAMPLEINDEX smp, std::ostream &f) const;
 	bool SaveIFFSample(SAMPLEINDEX smp, std::ostream &f) const;
-//#endif
+#endif
 
 	// Instrument file I/O
 	bool ReadInstrumentFromFile(INSTRUMENTINDEX nInstr, FileReader &file, bool mayNormalize = false);
@@ -1271,10 +1270,8 @@ public:
 	uint32 MapMidiInstrument(uint8 program, uint16 bank, uint8 midiChannel, uint8 note, bool isXG, std::bitset<32> drumChns);
 	size_t ITInstrToMPT(FileReader &file, ModInstrument &ins, uint16 trkvers);
 	std::pair<bool, bool> LoadMixPlugins(FileReader &file, bool ignoreChannelCount = true);
-#ifndef NO_PLUGINS
 	static void ReadMixPluginChunk(FileReader &file, SNDMIXPLUGIN &plugin);
 	void ProcessMidiOut(CHANNELINDEX nChn);
-#endif // NO_PLUGINS
 
 	void ProcessGlobalVolume(samplecount_t countChunk);
 	void ProcessStereoSeparation(samplecount_t countChunk);
@@ -1294,7 +1291,6 @@ public:
 };
 
 
-#ifndef NO_PLUGINS
 inline IMixPlugin* CSoundFile::GetInstrumentPlugin(INSTRUMENTINDEX instr) const noexcept
 {
 	if(instr > 0 && instr <= GetNumInstruments() && Instruments[instr] && Instruments[instr]->nMixPlug && Instruments[instr]->nMixPlug <= MAX_MIXPLUGINS)
@@ -1302,13 +1298,12 @@ inline IMixPlugin* CSoundFile::GetInstrumentPlugin(INSTRUMENTINDEX instr) const 
 	else
 		return nullptr;
 }
-#endif // NO_PLUGINS
 
 
 #define FADESONGDELAY		100
 
-MPT_CONSTEXPRINLINE int8 MOD2XMFineTune(int v) { return static_cast<int8>(static_cast<uint8>(v) << 4); }
-MPT_CONSTEXPRINLINE int8 XM2MODFineTune(int v) { return static_cast<int8>(static_cast<uint8>(v) >> 4); }
+MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE constexpr int8 MOD2XMFineTune(int v) { return static_cast<int8>(static_cast<uint8>(v) << 4); }
+MPT_ATTR_ALWAYSINLINE MPT_INLINE_FORCE constexpr int8 XM2MODFineTune(int v) { return static_cast<int8>(static_cast<uint8>(v) >> 4); }
 
 
 OPENMPT_NAMESPACE_END

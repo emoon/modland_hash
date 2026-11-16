@@ -8,7 +8,7 @@
  */
 
 static const char * const license =
-"Copyright (c) 2004-2025, OpenMPT Project Developers and Contributors" "\n"
+"Copyright (c) 2004-2026, OpenMPT Project Developers and Contributors" "\n"
 "Copyright (c) 1997-2003, Olivier Lapicque" "\n"
 "All rights reserved." "\n"
 "" "\n"
@@ -38,6 +38,25 @@ static const char * const license =
 #include "openmpt123_config.hpp"
 
 #include "mpt/base/detect_compiler.hpp"
+
+#if MPT_COMPILER_GCC
+
+#ifdef MPT_COMPILER_SETTING_QUIRK_GCC_BROKEN_IPA
+// See <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=115049>.
+#if MPT_GCC_BEFORE(9, 0, 0)
+// Earlier GCC get confused about setting a global function attribute.
+// We need to check for 9.0 instead of 9.1 because of
+// <https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=1028580>.
+// It also gets confused when setting global optimization -O1,
+// so we have no way of fixing GCC 8 or earlier.
+//#pragma GCC optimize("O1")
+#else
+#pragma GCC optimize("no-ipa-ra")
+#endif
+#endif // MPT_COMPILER_SETTING_QUIRK_GCC_BROKEN_IPA
+
+#endif // MPT_COMPILER_GCC
+
 #include "mpt/base/detect_os.hpp"
 #include "mpt/base/detect_quirks.hpp"
 
@@ -47,8 +66,10 @@ static const char * const license =
 
 #include "mpt/base/algorithm.hpp"
 #include "mpt/base/detect.hpp"
+#include "mpt/filemode/filemode.hpp"
+#include "mpt/filemode/stdio.hpp"
 #include "mpt/main/main.hpp"
-
+#include "mpt/out_of_memory/out_of_memory.hpp"
 #include "mpt/random/crand.hpp"
 #include "mpt/random/default_engines.hpp"
 #include "mpt/random/device.hpp"
@@ -74,7 +95,6 @@ static const char * const license =
 #include <cassert>
 #include <cmath>
 #include <cstdint>
-#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -87,7 +107,6 @@ static const char * const license =
 
 #include "openmpt123.hpp"
 #include "openmpt123_exception.hpp"
-#include "openmpt123_stdio.hpp"
 #include "openmpt123_terminal.hpp"
 
 #include "openmpt123_flac.hpp"
@@ -125,6 +144,12 @@ struct show_version_number_exception : public std::exception {
 };
 
 struct show_long_version_number_exception : public std::exception {
+};
+
+struct show_drivers_exception : public std::exception {
+};
+
+struct show_devices_exception : public std::exception {
 };
 
 constexpr auto libopenmpt_encoding = mpt::common_encoding::utf8;
@@ -324,6 +349,9 @@ public:
 	void write( const std::vector<std::int16_t*> buffers, std::size_t frames ) override {
 		impl->write( buffers, frames );
 	}
+	bool pause() override {
+		return impl->pause();
+	}
 	bool unpause() override {
 		return impl->unpause();
 	}
@@ -390,7 +418,7 @@ static concat_stream<mpt::ustring> & operator << ( concat_stream<mpt::ustring> &
 	s << MPT_USTRING("Repeat count: ") << flags.repeatcount << lf;
 	s << MPT_USTRING("Seek target: ") << flags.seek_target << lf;
 	s << MPT_USTRING("End time: ") << flags.end_time << lf;
-	s << MPT_USTRING("Standard output: ") << flags.use_stdout << lf;
+	s << MPT_USTRING("Standard output: ") << flags.stdout_data << lf;
 	s << MPT_USTRING("Output filename: ") << mpt::transcode<mpt::ustring>( flags.output_filename ) << lf;
 	s << MPT_USTRING("Force overwrite output file: ") << flags.force_overwrite << lf;
 	s << MPT_USTRING("Ctls: ") << ctls_to_string( flags.ctls ) << lf;
@@ -469,7 +497,7 @@ static void show_banner( concat_stream<mpt::ustring> & log, verbosity banner ) {
 		return;
 	}
 	log << MPT_USTRING("openmpt123") << MPT_USTRING(" v") << mpt::transcode<mpt::ustring>( mpt::source_encoding, OPENMPT123_VERSION_STRING ) << MPT_USTRING(", libopenmpt ") << mpt::transcode<mpt::ustring>( libopenmpt_encoding, openmpt::string::get( "library_version" ) ) << MPT_USTRING(" (") << MPT_USTRING("OpenMPT ") << mpt::transcode<mpt::ustring>( libopenmpt_encoding, openmpt::string::get( "core_version" ) ) << MPT_USTRING(")") << lf;
-	log << MPT_USTRING("Copyright (c) 2013-2025 OpenMPT Project Developers and Contributors <https://lib.openmpt.org/>") << lf;
+	log << MPT_USTRING("Copyright (c) 2013-2026 OpenMPT Project Developers and Contributors <https://lib.openmpt.org/>") << lf;
 	if ( banner == verbosity_normal ) {
 		log << lf;
 		return;
@@ -516,7 +544,7 @@ static void show_banner( concat_stream<mpt::ustring> & log, verbosity banner ) {
 static void show_man_version( textout & log ) {
 	log << MPT_USTRING("openmpt123") << MPT_USTRING(" v") << mpt::transcode<mpt::ustring>( mpt::source_encoding, OPENMPT123_VERSION_STRING ) << lf;
 	log << lf;
-	log << MPT_USTRING("Copyright (c) 2013-2025 OpenMPT Project Developers and Contributors <https://lib.openmpt.org/>") << lf;
+	log << MPT_USTRING("Copyright (c) 2013-2026 OpenMPT Project Developers and Contributors <https://lib.openmpt.org/>") << lf;
 }
 
 static void show_short_version( textout & log ) {
@@ -588,37 +616,32 @@ static void show_help_keyboard( textout & log, bool man_version = false ) {
 }
 
 static void show_help( textout & log, bool longhelp = false, bool man_version = false, const mpt::ustring & message = mpt::ustring() ) {
-	{
-		log << MPT_USTRING("Usage: openmpt123 [options] [--] file1 [file2] ...") << lf;
+	log << MPT_USTRING("Usage: openmpt123 [options] [--] file1 [file2] ...") << lf;
+	log << lf;
+	if ( man_version ) {
+		log << MPT_USTRING("openmpt123 plays module music files.") << lf;
 		log << lf;
-		if ( man_version ) {
-			log << MPT_USTRING("openmpt123 plays module music files.") << lf;
-			log << lf;
-		}
-		if ( man_version ) {
-			log << MPT_USTRING("Options:") << lf;
-			log << lf;
-		}
-		log << MPT_USTRING(" -h, --help                 Show help") << lf;
-		log << MPT_USTRING("     --help-keyboard        Show keyboard hotkeys in ui mode") << lf;
-		log << MPT_USTRING(" -q, --quiet                Suppress non-error screen output") << lf;
-		log << MPT_USTRING(" -v, --verbose              Show more screen output") << lf;
-		log << MPT_USTRING("     --version              Show version information and exit") << lf;
-		log << MPT_USTRING("     --short-version        Show version number and nothing else") << lf;
-		log << MPT_USTRING("     --long-version         Show long version information and exit") << lf;
-		log << MPT_USTRING("     --credits              Show elaborate contributors list") << lf;
-		log << MPT_USTRING("     --license              Show license") << lf;
+	}
+	if ( man_version ) {
+		log << MPT_USTRING("Options:") << lf;
 		log << lf;
-		log << MPT_USTRING("     --probe                Probe each file whether it is a supported file format") << lf;
-		log << MPT_USTRING("     --info                 Display information about each file") << lf;
-		log << MPT_USTRING("     --ui                   Interactively play each file") << lf;
-		log << MPT_USTRING("     --batch                Play each file") << lf;
-		log << MPT_USTRING("     --render               Render each file to individual PCM data files") << lf;
-		if ( !longhelp ) {
-			log << lf;
-			log.writeout();
-			return;
-		}
+	}
+	log << MPT_USTRING(" -h, --help                 Show help") << lf;
+	log << MPT_USTRING("     --help-keyboard        Show keyboard hotkeys in ui mode") << lf;
+	log << MPT_USTRING(" -q, --quiet                Suppress non-error screen output") << lf;
+	log << MPT_USTRING(" -v, --verbose              Show more screen output") << lf;
+	log << MPT_USTRING("     --version              Show version information and exit") << lf;
+	log << MPT_USTRING("     --short-version        Show version number and nothing else") << lf;
+	log << MPT_USTRING("     --long-version         Show long version information and exit") << lf;
+	log << MPT_USTRING("     --credits              Show elaborate contributors list") << lf;
+	log << MPT_USTRING("     --license              Show license") << lf;
+	log << lf;
+	log << MPT_USTRING("     --probe                Probe each file whether it is a supported file format") << lf;
+	log << MPT_USTRING("     --info                 Display information about each file") << lf;
+	log << MPT_USTRING("     --ui                   Interactively play each file") << lf;
+	log << MPT_USTRING("     --batch                Play each file") << lf;
+	log << MPT_USTRING("     --render               Render each file to individual PCM data files") << lf;
+	if ( longhelp ) {
 		log << lf;
 		log << MPT_USTRING("     --banner n             openmpt123 banner style [0=hide,1=show,2=verbose] [default: ") << commandlineflags().banner << MPT_USTRING("]") << lf;
 		log << lf;
@@ -665,7 +688,7 @@ static void show_help( textout & log, bool longhelp = false, bool man_version = 
 		log << MPT_USTRING("                            use --device help to show available devices") << lf;
 		log << MPT_USTRING("     --buffer n             Set output buffer size to n ms [default: ") << commandlineflags().buffer << MPT_USTRING("]") << lf;
 		log << MPT_USTRING("     --period n             Set output period size to n ms [default: ") << commandlineflags().period  << MPT_USTRING("]") << lf;
-		log << MPT_USTRING("     --stdout               Write raw audio data to stdout [default: ") << commandlineflags().use_stdout << MPT_USTRING("]") << lf;
+		log << MPT_USTRING("     --stdout               Write raw audio data to stdout [default: ") << commandlineflags().stdout_data << MPT_USTRING("]") << lf;
 		log << MPT_USTRING("     --output-type t        Use output format t when writing to a individual PCM files (only applies to --render mode) [default: ") << mpt::transcode<mpt::ustring>( commandlineflags().output_extension ) << MPT_USTRING("]") << lf;
 		log << MPT_USTRING(" -o, --output f             Write PCM output to file f instead of streaming to audio device (only applies to --ui and --batch modes) [default: ") << mpt::transcode<mpt::ustring>( commandlineflags().output_filename ) << MPT_USTRING("]") << lf;
 		log << MPT_USTRING("     --force                Force overwriting of output file [default: ") << commandlineflags().force_overwrite << MPT_USTRING("]") << lf;
@@ -1084,8 +1107,8 @@ void render_loop( commandlineflags & flags, Tmod & mod, double & duration, texto
 
 		if ( flags.mode == Mode::UI ) {
 
-			while ( terminal_input::is_input_available() ) {
-				auto c = terminal_input::read_input_char();
+			while ( mpt::terminal::input::is_input_available() ) {
+				auto c = mpt::terminal::input::read_input_char();
 				if ( !c ) {
 					break;
 				}
@@ -1300,7 +1323,8 @@ void render_loop( commandlineflags & flags, Tmod & mod, double & duration, texto
 					log << MPT_USTRING(":");
 				}
 			}
-			log << MPT_USTRING("   ") << MPT_USTRING("\r");
+			log << MPT_USTRING("   ");
+			log.cursor_rewind();
 		} else {
 			if ( flags.show_ui ) {
 				log << MPT_USTRING(" ");
@@ -1343,7 +1367,8 @@ void render_loop( commandlineflags & flags, Tmod & mod, double & duration, texto
 				log << seconds_to_string( duration );
 			}
 			if ( flags.show_ui || flags.show_details || flags.show_progress ) {
-				log << MPT_USTRING("   ") << MPT_USTRING("\r");
+				log << MPT_USTRING("   ");
+				log.cursor_rewind();
 			}
 		}
 
@@ -1727,7 +1752,7 @@ static void render_files( commandlineflags & flags, textout & log, write_buffers
 }
 
 
-static bool parse_playlist( commandlineflags & flags, mpt::native_path filename, concat_stream<mpt::ustring> & log ) {
+static bool parse_playlist( commandlineflags & flags, mpt::native_path filename ) {
 	bool is_playlist = false;
 	bool m3u8 = false;
 	if ( get_extension( filename ) == MPT_NATIVE_PATH("m3u") || get_extension( filename ) == MPT_NATIVE_PATH("m3U") || get_extension( filename ) == MPT_NATIVE_PATH("M3u") || get_extension( filename ) == MPT_NATIVE_PATH("M3U") ) {
@@ -1741,85 +1766,79 @@ static bool parse_playlist( commandlineflags & flags, mpt::native_path filename,
 		is_playlist = true;
 	}
 	mpt::native_path basepath = get_basepath( filename );
-	try {
-		mpt::IO::ifstream file_stream( filename, std::ios::binary );
-		std::string line;
-		bool first = true;
-		bool extm3u = false;
-		bool pls = false;
-		while ( std::getline( file_stream, line ) ) {
-			mpt::native_path newfile;
-			line = trim_eol( line );
-			if ( first ) {
-				first = false;
-				if ( line == "#EXTM3U" ) {
-					extm3u = true;
-					continue;
-				} else if ( line == "[playlist]" ) {
-					pls = true;
-				}
-			}
-			if ( line.empty() ) {
+	mpt::IO::ifstream file_stream( filename, std::ios::binary );
+	std::string line;
+	bool first = true;
+	bool extm3u = false;
+	bool pls = false;
+	while ( std::getline( file_stream, line ) ) {
+		mpt::native_path newfile;
+		line = trim_eol( line );
+		if ( first ) {
+			first = false;
+			if ( line == "#EXTM3U" ) {
+				extm3u = true;
 				continue;
-			}
-			constexpr auto pls_encoding = mpt::common_encoding::utf8;
-			constexpr auto m3u8_encoding = mpt::common_encoding::utf8;
-#if MPT_OS_WINDOWS
-			constexpr auto m3u_encoding = mpt::logical_encoding::locale;
-#else
-			constexpr auto m3u_encoding = mpt::common_encoding::utf8;
-#endif
-			if ( pls ) {
-				if ( mpt::starts_with( line, "File" ) ) {
-					if ( line.find( "=" ) != std::string::npos ) {
-						flags.filenames.push_back( mpt::transcode<mpt::native_path>( pls_encoding, line.substr( line.find( "=" ) + 1 ) ) );
-					}
-				} else if ( mpt::starts_with( line, "Title" ) ) {
-					continue;
-				} else if ( mpt::starts_with( line, "Length" ) ) {
-					continue;
-				} else if ( mpt::starts_with( line, "NumberOfEntries" ) ) {
-					continue;
-				} else if ( mpt::starts_with( line, "Version" ) ) {
-					continue;
-				} else {
-					continue;
-				}
-			} else if ( extm3u ) {
-				if ( mpt::starts_with( line, "#EXTINF" ) ) {
-					continue;
-				} else if ( mpt::starts_with( line, "#" ) ) {
-					continue;
-				}
-				if ( m3u8 ) {
-					newfile = mpt::transcode<mpt::native_path>( m3u8_encoding, line );
-				} else {
-					newfile = mpt::transcode<mpt::native_path>( m3u_encoding, line );
-				}
-			} else {
-				if ( m3u8 ) {
-					newfile = mpt::transcode<mpt::native_path>( m3u8_encoding, line );
-				} else {
-					newfile = mpt::transcode<mpt::native_path>( m3u_encoding, line );
-				}
-			}
-			if ( !newfile.empty() ) {
-				if ( !is_absolute( newfile ) ) {
-					newfile = basepath + newfile;
-				}
-				flags.filenames.push_back( newfile );
+			} else if ( line == "[playlist]" ) {
+				pls = true;
 			}
 		}
-	} catch ( std::exception & e ) {
-		log << MPT_USTRING("error loading '") << mpt::transcode<mpt::ustring>( filename ) << MPT_USTRING("': ") << mpt::get_exception_text<mpt::ustring>( e ) << lf;
-	} catch ( ... ) {
-		log << MPT_USTRING("unknown error loading '") << mpt::transcode<mpt::ustring>( filename ) << MPT_USTRING("'") << lf;
+		if ( line.empty() ) {
+			continue;
+		}
+		constexpr auto pls_encoding = mpt::common_encoding::utf8;
+		constexpr auto m3u8_encoding = mpt::common_encoding::utf8;
+#if MPT_OS_WINDOWS
+		constexpr auto m3u_encoding = mpt::logical_encoding::locale;
+#else
+		constexpr auto m3u_encoding = mpt::common_encoding::utf8;
+#endif
+		if ( pls ) {
+			if ( mpt::starts_with( line, "File" ) ) {
+				if ( line.find( "=" ) != std::string::npos ) {
+					flags.filenames.push_back( mpt::transcode<mpt::native_path>( pls_encoding, line.substr( line.find( "=" ) + 1 ) ) );
+				}
+			} else if ( mpt::starts_with( line, "Title" ) ) {
+				continue;
+			} else if ( mpt::starts_with( line, "Length" ) ) {
+				continue;
+			} else if ( mpt::starts_with( line, "NumberOfEntries" ) ) {
+				continue;
+			} else if ( mpt::starts_with( line, "Version" ) ) {
+				continue;
+			} else {
+				continue;
+			}
+		} else if ( extm3u ) {
+			if ( mpt::starts_with( line, "#EXTINF" ) ) {
+				continue;
+			} else if ( mpt::starts_with( line, "#" ) ) {
+				continue;
+			}
+			if ( m3u8 ) {
+				newfile = mpt::transcode<mpt::native_path>( m3u8_encoding, line );
+			} else {
+				newfile = mpt::transcode<mpt::native_path>( m3u_encoding, line );
+			}
+		} else {
+			if ( m3u8 ) {
+				newfile = mpt::transcode<mpt::native_path>( m3u8_encoding, line );
+			} else {
+				newfile = mpt::transcode<mpt::native_path>( m3u_encoding, line );
+			}
+		}
+		if ( !newfile.empty() ) {
+			if ( !is_absolute( newfile ) ) {
+				newfile = basepath + newfile;
+			}
+			flags.filenames.push_back( newfile );
+		}
 	}
 	return is_playlist;
 }
 
 
-static void parse_openmpt123( commandlineflags & flags, const std::vector<mpt::ustring> & args, concat_stream<mpt::ustring> & log ) {
+static void parse_openmpt123( commandlineflags & flags, const std::vector<mpt::ustring> & args ) {
 
 	enum class action {
 		help,
@@ -1831,6 +1850,8 @@ static void parse_openmpt123( commandlineflags & flags, const std::vector<mpt::u
 		long_version,
 		credits,
 		license,
+		show_drivers,
+		show_devices,
 	};
 
 	std::optional<action> return_action;
@@ -1956,9 +1977,10 @@ static void parse_openmpt123( commandlineflags & flags, const std::vector<mpt::u
 				if ( false ) {
 					// nothing
 				} else if ( nextarg == MPT_USTRING("help") ) {
-					string_concat_stream<mpt::ustring> drivers;
-					realtime_audio_stream::show_drivers( drivers );
-					throw show_help_exception( drivers.str() );
+					if ( return_action ) {
+						throw args_error_exception();
+					}
+					return_action = action::show_drivers;
 				} else if ( nextarg == MPT_USTRING("default") ) {
 					flags.driver = MPT_USTRING("");
 				} else {
@@ -1969,9 +1991,10 @@ static void parse_openmpt123( commandlineflags & flags, const std::vector<mpt::u
 				if ( false ) {
 					// nothing
 				} else if ( nextarg == MPT_USTRING("help") ) {
-					string_concat_stream<mpt::ustring> devices;
-					realtime_audio_stream::show_devices( devices, log );
-					throw show_help_exception( devices.str() );
+					if ( return_action ) {
+						throw args_error_exception();
+					}
+					return_action = action::show_devices;
 				} else if ( nextarg == MPT_USTRING("default") ) {
 					flags.device = MPT_USTRING("");
 				} else {
@@ -1988,7 +2011,7 @@ static void parse_openmpt123( commandlineflags & flags, const std::vector<mpt::u
 				mpt::parse_into( flags.ui_redraw_interval, nextarg );
 				++i;
 			} else if ( arg == MPT_USTRING("--stdout") ) {
-				flags.use_stdout = true;
+				flags.stdout_data = true;
 			} else if ( ( arg == MPT_USTRING("-o") || arg == MPT_USTRING("--output") ) && nextarg != MPT_USTRING("") ) {
 				flags.output_filename = mpt::transcode<mpt::native_path>( nextarg );
 				++i;
@@ -2031,7 +2054,7 @@ static void parse_openmpt123( commandlineflags & flags, const std::vector<mpt::u
 				mpt::parse_into( flags.dither, nextarg );
 				++i;
 			} else if ( arg == MPT_USTRING("--playlist") && nextarg != MPT_USTRING("") ) {
-				parse_playlist( flags, mpt::transcode<mpt::native_path>( nextarg ), log );
+				parse_playlist( flags, mpt::transcode<mpt::native_path>( nextarg ) );
 				++i;
 			} else if ( arg == MPT_USTRING("--randomize") ) {
 				flags.randomize = true;
@@ -2104,111 +2127,123 @@ static void parse_openmpt123( commandlineflags & flags, const std::vector<mpt::u
 			case action::license:
 				throw show_license_exception();
 				break;
+			case action::show_drivers:
+				throw show_drivers_exception();
+				break;
+			case action::show_devices:
+				throw show_devices_exception();
+				break;
 		}
 	}
 
 }
 
-static mpt::uint8 main( std::vector<mpt::ustring> args ) {
-
-	FILE_mode_guard stdout_text_guard( stdout, FILE_mode::text );
-	FILE_mode_guard stderr_text_guard( stderr, FILE_mode::text );
-
-	textout_wrapper<textout_destination::destination_stdout> std_out;
-	textout_wrapper<textout_destination::destination_stderr> std_err;
+static mpt::uint8 main( std::vector<mpt::ustring> args, mpt::main::stdin_token token_in, mpt::main::stdout_token token_out, mpt::main::stderr_token token_err ) {
 
 	commandlineflags flags;
-
 	try {
-
-		parse_openmpt123( flags, args, std_err );
-
+		parse_openmpt123( flags, args );
 		flags.check_and_sanitize();
-
-	} catch ( args_nofiles_exception & ) {
-		show_banner( std_out, flags.banner );
-		show_help( std_out );
-		std_out.writeout();
-		return 0;
-	} catch ( args_error_exception & ) {
-		show_banner( std_out, flags.banner );
-		show_help( std_out );
-		std_out.writeout();
-		if ( args.size() > 1 ) {
-			std_err << MPT_USTRING("Error parsing command line.") << lf;
-			std_err.writeout();
-		}
-		return 1;
-	} catch ( show_man_help_exception & ) {
-		show_banner( std_out, flags.banner );
-		show_help( std_out, true, true );
-		return 0;
-	} catch ( show_man_version_exception & ) {
-		show_man_version( std_out );
-		return 0;
-	} catch ( show_help_exception & e ) {
-		show_banner( std_out, flags.banner );
-		show_help( std_out, e.longhelp, false, e.message );
-		if ( flags.verbose ) {
-			show_credits( std_out, verbosity_hidden );
-		}
-		return 0;
-	} catch ( show_help_keyboard_exception & ) {
-		show_banner( std_out, flags.banner );
-		show_help_keyboard( std_out );
-		return 0;
-	} catch ( show_long_version_number_exception & ) {
-		show_long_version( std_out );
-		return 0;
-	} catch ( show_version_number_exception & ) {
-		show_version( std_out );
-		return 0;
-	} catch ( show_short_version_number_exception & ) {
-		show_short_version( std_out );
-		return 0;
-	} catch ( show_credits_exception & ) {
-		show_credits( std_out, flags.banner );
-		return 0;
-	} catch ( show_license_exception & ) {
-		show_license( std_out, flags.banner );
-		return 0;
-	} catch ( silent_exit_exception & ) {
-		return 0;
-	} catch ( exception & e ) {
-		std_err << MPT_USTRING("error: ") << mpt::get_exception_text<mpt::ustring>( e ) << lf;
-		std_err.writeout();
-		return 1;
-	} catch ( std::exception & e ) {
-		std_err << MPT_USTRING("error: ") << mpt::get_exception_text<mpt::ustring>( e ) << lf;
-		std_err.writeout();
-		return 1;
 	} catch ( ... ) {
-		std_err << MPT_USTRING("unknown error") << lf;
-		std_err.writeout();
-		return 1;
+		mpt::terminal::stdio_manager stdio{
+			std::move( token_in ), mpt::terminal::stdio_manager::api::unused, mpt::terminal::stdio_manager::stdin_mode::unused,
+			std::move( token_out ), mpt::terminal::stdio_manager::api::stdiostream, mpt::terminal::stdio_manager::stdout_mode::text,
+			std::move( token_err ), mpt::terminal::stdio_manager::api::stdiostream, mpt::terminal::stdio_manager::stderr_mode::text
+		};
+		textout & std_out = stdio.output_text();
+		textout & std_err = stdio.error_text();
+		try {
+			throw;
+		} catch ( args_nofiles_exception & ) {
+			show_banner( std_out, flags.banner );
+			show_help( std_out );
+			std_out.writeout();
+			return 0;
+		} catch ( args_error_exception & ) {
+			show_banner( std_out, flags.banner );
+			show_help( std_out );
+			std_out.writeout();
+			if ( args.size() > 1 ) {
+				std_err << MPT_USTRING("Error parsing command line.") << lf;
+				std_err.writeout();
+			}
+			return 1;
+		} catch ( show_man_help_exception & ) {
+			show_banner( std_out, flags.banner );
+			show_help( std_out, true, true );
+			return 0;
+		} catch ( show_man_version_exception & ) {
+			show_man_version( std_out );
+			return 0;
+		} catch ( show_help_exception & e ) {
+			show_banner( std_out, flags.banner );
+			show_help( std_out, e.longhelp, false );
+			if ( flags.verbose ) {
+				show_credits( std_out, verbosity_hidden );
+			}
+			return 0;
+		} catch ( show_help_keyboard_exception & ) {
+			show_banner( std_out, flags.banner );
+			show_help_keyboard( std_out );
+			return 0;
+		} catch ( show_long_version_number_exception & ) {
+			show_long_version( std_out );
+			return 0;
+		} catch ( show_version_number_exception & ) {
+			show_version( std_out );
+			return 0;
+		} catch ( show_short_version_number_exception & ) {
+			show_short_version( std_out );
+			return 0;
+		} catch ( show_credits_exception & ) {
+			show_credits( std_out, flags.banner );
+			return 0;
+		} catch ( show_license_exception & ) {
+			show_license( std_out, flags.banner );
+			return 0;
+		} catch ( show_drivers_exception & ) {
+			show_banner( std_out, flags.banner );
+			string_concat_stream<mpt::ustring> drivers;
+			realtime_audio_stream::show_drivers( drivers );
+			show_help( std_out, false, false, drivers.str() );
+			return 0;
+		} catch ( show_devices_exception & ) {
+			show_banner( std_out, flags.banner );
+			string_concat_stream<mpt::ustring> devices;
+			realtime_audio_stream::show_devices( devices, std_err );
+			show_help( std_out, false, false, devices.str() );
+			return 0;
+		} catch ( mpt::out_of_memory e ) {
+			std_err << MPT_USTRING("not enough memory") << lf;
+			std_err.writeout();
+			mpt::delete_out_of_memory( e );
+			return 1;
+		} catch ( exception & e ) {
+			std_err << MPT_USTRING("error: ") << mpt::get_exception_text<mpt::ustring>( e ) << lf;
+			std_err.writeout();
+			return 1;
+		} catch ( std::exception & e ) {
+			std_err << MPT_USTRING("error: ") << mpt::get_exception_text<mpt::ustring>( e ) << lf;
+			std_err.writeout();
+			return 1;
+		} catch ( ... ) {
+			std_err << MPT_USTRING("unknown error") << lf;
+			std_err.writeout();
+			return 1;
+		}
 	}
 
+	mpt::terminal::stdio_manager stdio{
+		std::move( token_in ),
+			flags.stdin_data ? mpt::terminal::stdio_manager::api::stdiostream : ( flags.mode == Mode::UI ) ? mpt::terminal::stdio_manager::api::crt : mpt::terminal::stdio_manager::api::unused,
+			flags.stdin_data ? mpt::terminal::stdio_manager::stdin_mode::binary : ( flags.mode == Mode::UI ) ? mpt::terminal::stdio_manager::stdin_mode::terminal : mpt::terminal::stdio_manager::stdin_mode::unused,
+		std::move( token_out ), mpt::terminal::stdio_manager::api::stdiostream, flags.stdout_data ? mpt::terminal::stdio_manager::stdout_mode::binary : mpt::terminal::stdio_manager::stdout_mode::text,
+		std::move( token_err ), mpt::terminal::stdio_manager::api::stdiostream, mpt::terminal::stdio_manager::stderr_mode::text
+	};
+	textout & log = flags.quiet ? stdio.silent_text() : stdio.output_text();
+	textout & log_err = stdio.error_text();
+
 	try {
-
-		const FILE_mode stdin_mode = mpt::contains( flags.filenames, MPT_NATIVE_PATH("-") ) ? FILE_mode::binary : FILE_mode::text;
-		const FILE_mode stdout_mode = flags.use_stdout ? FILE_mode::binary : FILE_mode::text;
-
-		[[maybe_unused]] const bool stdin_text = ( stdin_mode == FILE_mode::text );
-		[[maybe_unused]] const bool stdin_data = ( stdin_mode == FILE_mode::binary );
-		[[maybe_unused]] const bool stdout_text = ( stdout_mode == FILE_mode::text );
-		[[maybe_unused]] const bool stdout_data = ( stdout_mode == FILE_mode::binary );
-
-		// set stdin/stdout to binary for data input/output
-		[[maybe_unused]] std::optional<FILE_mode_guard> stdin_guard{ stdin_data ? std::make_optional<FILE_mode_guard>( stdin, FILE_mode::binary ) : std::nullopt };
-		[[maybe_unused]] std::optional<FILE_mode_guard> stdout_guard{ stdout_data ? std::make_optional<FILE_mode_guard>( stdout, FILE_mode::binary ) : std::nullopt };
-
-		// setup terminal input
-		[[maybe_unused]] std::optional<FILE_mode_guard> stdin_text_guard{ stdin_text ? std::make_optional<FILE_mode_guard>( stdin, FILE_mode::text ) : std::nullopt };
-		[[maybe_unused]] std::optional<terminal_ui_guard> input_guard{ stdin_text && ( flags.mode == Mode::UI ) ? std::make_optional<terminal_ui_guard>() : std::nullopt };
-
-		// choose text output between quiet/stdout/stderr
-		textout_dummy dummy_log;
-		textout & log = flags.quiet ? static_cast<textout&>( dummy_log ) : stdout_text ? static_cast<textout&>( std_out ) : static_cast<textout&>( std_err );
 
 		show_banner( log, flags.banner );
 
@@ -2239,7 +2274,7 @@ static mpt::uint8 main( std::vector<mpt::ustring> args ) {
 			} break;
 			case Mode::UI:
 			case Mode::Batch: {
-				if ( flags.use_stdout ) {
+				if ( flags.stdout_data ) {
 					flags.apply_default_buffer_sizes();
 					stdout_stream_raii stdout_audio_stream;
 					render_files( flags, log, stdout_audio_stream, prng );
@@ -2264,25 +2299,31 @@ static mpt::uint8 main( std::vector<mpt::ustring> args ) {
 			break;
 		}
 
-	} catch ( args_error_exception & ) {
-		show_banner( std_out, flags.banner );
-		show_help( std_out );
-		std_err << MPT_USTRING("Error parsing command line.") << lf;
-		std_err.writeout();
-		return 1;
 	} catch ( silent_exit_exception & ) {
 		return 0;
+	} catch ( args_error_exception & ) {
+		show_banner( log, flags.banner );
+		show_help( log );
+		log.writeout();
+		log_err << MPT_USTRING("Error parsing command line.") << lf;
+		log_err.writeout();
+		return 1;
+	} catch ( mpt::out_of_memory e ) {
+		log_err << MPT_USTRING("not enough memory") << lf;
+		log_err.writeout();
+		mpt::delete_out_of_memory( e );
+		return 1;
 	} catch ( exception & e ) {
-		std_err << MPT_USTRING("error: ") << mpt::get_exception_text<mpt::ustring>( e ) << lf;
-		std_err.writeout();
+		log_err << MPT_USTRING("error: ") << mpt::get_exception_text<mpt::ustring>( e ) << lf;
+		log_err.writeout();
 		return 1;
 	} catch ( std::exception & e ) {
-		std_err << MPT_USTRING("error: ") << mpt::get_exception_text<mpt::ustring>( e ) << lf;
-		std_err.writeout();
+		log_err << MPT_USTRING("error: ") << mpt::get_exception_text<mpt::ustring>( e ) << lf;
+		log_err.writeout();
 		return 1;
 	} catch ( ... ) {
-		std_err << MPT_USTRING("unknown error") << lf;
-		std_err.writeout();
+		log_err << MPT_USTRING("unknown error") << lf;
+		log_err.writeout();
 		return 1;
 	}
 

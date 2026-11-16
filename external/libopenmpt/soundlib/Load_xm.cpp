@@ -239,6 +239,8 @@ static std::vector<SAMPLEINDEX> AllocateXMSamples(CSoundFile &sndFile, SAMPLEIND
 // Read .XM patterns
 static void ReadXMPatterns(FileReader &file, const XMFileHeader &fileHeader, CSoundFile &sndFile)
 {
+	const bool isNitroTracker = !memcmp(fileHeader.trackerName, "NitroTracker", 13);
+
 	// Reading patterns
 	sndFile.Patterns.ResizeArray(fileHeader.patterns);
 	for(PATTERNINDEX pat = 0; pat < fileHeader.patterns; pat++)
@@ -326,6 +328,10 @@ static void ReadXMPatterns(FileReader &file, const XMFileHeader &fileHeader, CSo
 
 			if(m.instr == 0xFF)
 			{
+				m.instr = 0;
+			} else if(isNitroTracker && m.instr && !m.IsNote())
+			{
+				// NitroTracker ignores instrument numbers unless there's a note next to them
 				m.instr = 0;
 			}
 
@@ -1138,7 +1144,7 @@ bool CSoundFile::ReadXM(FileReader &file, ModLoadingFlags loadFlags)
 // work-around massively confused GCC 13/14 optimizer:
 // /usr/include/c++/13/bits/stl_algobase.h:437:30: warning: 'void* __builtin_memcpy(void*, const void*, long unsigned int)' writing between 3 and 9223372036854775806 bytes into a region of size 0 overflows the destination [-Wstringop-overflow=]
 template <typename Tcont2, typename Tcont1>
-static MPT_NOINLINE Tcont1 & gcc_append(Tcont1 & cont1, const Tcont2 & cont2) {
+MPT_ATTR_NOINLINE MPT_DECL_NOINLINE static Tcont1 & gcc_append(Tcont1 & cont1, const Tcont2 & cont2) {
 	cont1.insert(cont1.end(), cont2.begin(), cont2.end());
 	return cont1;
 }

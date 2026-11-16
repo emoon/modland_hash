@@ -644,7 +644,7 @@ bool CSoundFile::ReadMDL(FileReader &file, ModLoadingFlags loadFlags)
 				if(sampleHeader.smpNum == 0 || sampleHeader.smpNum > GetNumSamples())
 					continue;
 
-				LimitMax(sampleHeader.lastNote, static_cast<uint8>(std::size(mptIns->Keyboard)));
+				LimitMax(sampleHeader.lastNote, static_cast<uint8>(std::size(mptIns->Keyboard) - 1));
 				for(uint8 n = firstNote; n <= sampleHeader.lastNote; n++)
 				{
 					mptIns->Keyboard[n] = sampleHeader.smpNum;
@@ -654,7 +654,7 @@ bool CSoundFile::ReadMDL(FileReader &file, ModLoadingFlags loadFlags)
 				CopyEnvelope(mptIns->VolEnv, sampleHeader.volEnvFlags, volEnvs);
 				CopyEnvelope(mptIns->PanEnv, sampleHeader.panEnvFlags, panEnvs);
 				CopyEnvelope(mptIns->PitchEnv, sampleHeader.freqEnvFlags, pitchEnvs);
-				mptIns->nFadeOut = (sampleHeader.fadeout + 1u) / 2u;
+				mptIns->nFadeOut = static_cast<uint16>((sampleHeader.fadeout + 1u) / 2u);
 #ifdef MODPLUG_TRACKER
 				if((mptIns->VolEnv.dwFlags & (ENV_ENABLED | ENV_LOOP)) == ENV_ENABLED)
 				{
