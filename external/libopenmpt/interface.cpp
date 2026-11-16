@@ -37,12 +37,15 @@ static uint64_t hash_patterns(openmpt::module& mod, int dump_patterns) {
 
     const int32_t num_channels = mod.get_num_channels();
     const int32_t num_songs = mod.get_num_subsongs();
+    int32_t prev_sequence = -1;
     for (auto s = 0; s < num_songs; s++) {
         mod.select_subsong(s);
-        if (mod.get_current_order() != 0) {
+        const auto this_sequence = mod.get_current_sequence();
+        if (prev_sequence == this_sequence) {
             // Ignore hidden subsongs, as we go through the whole oder list anyway.
             continue;
         }
+        prev_sequence = this_sequence;
 
         const auto num_orders = mod.get_num_orders();
         // Go through the complete sequence order by order.
