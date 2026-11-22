@@ -677,19 +677,51 @@ fn build_database(out_filename: &str, database_path: &str, args: &Args) {
     println!("Done");
 }
 
-fn create_db_file(filename: &str) -> Result<File> {
-    if let Ok(file) = File::create(filename) {
-        return Ok(file);
-    }
-
-    bail!(
-        "Tried to create database at {} but was unable to do so. Manually download {} and place it next to the modland_has executable",
-        filename, DB_REMOTE,
-    )
+fn part_path(path: &Path) -> PathBuf {
+    let mut part = path.as_os_str().to_owned();
+    part.push(".part");
+    PathBuf::from(part)
 }
 
-fn create_progress_bar(len: usize) -> ProgressBar {
-    let pb = ProgressBar::new(len as _);
+// `final_path` only ever appears fully written: data goes to `<final_path>.part` first.
+fn write_atomically(
+    final_path: &Path,
+    mut reader: impl Read,
+    mut on_progress: impl FnMut(u64),
+) -> std::io::Result<()> {
+    let part = part_path(final_path);
+    let mut copy = || -> std::io::Result<()> {
+        let mut file = File::create(&part)?;
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut written = 0u64;
+        loop {
+            let read_size = reader.read(&mut buf)?;
+            if read_size == 0 {
+                break;
+            }
+            file.write_all(&buf[..read_size])?;
+            written += read_size as u64;
+            on_progress(written);
+        }
+        file.flush()?;
+        drop(file);
+        std::fs::rename(&part, final_path)
+    };
+
+    let result = copy();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&part);
+    }
+    result
+}
+
+fn create_progress_bar(len: Option<u64>) -> ProgressBar {
+    let Some(len) = len else {
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(ProgressStyle::with_template("{prefix} [{elapsed_precise}] {bytes}").unwrap());
+        return pb;
+    };
+    let pb = ProgressBar::new(len);
     //pb.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})")
     pb.set_style(
         ProgressStyle::with_template(
@@ -708,47 +740,34 @@ fn create_progress_bar(len: usize) -> ProgressBar {
 }
 
 // Download and upack the database
-fn download_db() -> Result<ProgressBar> {
-    let filename = format!("{}.7z", get_db_filename());
-    let mut file = create_db_file(&filename)?;
+fn download_db() -> Result<()> {
+    let filename = PathBuf::from(format!("{}.7z", get_db_filename()));
 
     let resp = ureq::get(DB_REMOTE).call()?;
-    let len: usize = resp.header("Content-Length").unwrap().parse()?;
-
-    let mut temp_buffer: [u8; 1024] = [0; 1024];
-    let mut reader = resp.into_reader();
+    let len = resp
+        .header("Content-Length")
+        .and_then(|v| v.parse::<u64>().ok());
 
     let pb = create_progress_bar(len);
-
     pb.set_prefix("Downloading Database");
 
-    let mut pos = 0;
+    write_atomically(&filename, resp.into_reader(), |pos| pb.set_position(pos)).with_context(
+        || {
+            format!(
+                "Failed to download database to {}. Manually download {} and place it next to the modland_hash executable",
+                filename.display(),
+                DB_REMOTE,
+            )
+        },
+    )?;
 
-    loop {
-        let read_size = reader.read(&mut temp_buffer)?;
-
-        if read_size == 0 {
-            break;
-        }
-
-        pb.set_position(pos);
-        pos += read_size as u64;
-
-        file.write_all(&temp_buffer[0..read_size])?;
-    }
-
-    Ok(pb)
+    pb.finish();
+    Ok(())
 }
 
-fn decompress_db(pb: Option<ProgressBar>) -> Result<()> {
-    let filename = format!("{}.7z", get_db_filename());
-
-    // Check if compressed file exists and unpack it
-    if !Path::new(&filename).exists() {
-        return Ok(());
-    }
-
-    let mut sz = sevenz_rust::SevenZReader::open(&filename, "pass".into()).unwrap();
+// The archive holds the database as its only file; the first entry with data is used.
+fn extract_database(archive: &Path, db_path: &Path) -> Result<()> {
+    let mut sz = sevenz_rust::SevenZReader::open(archive, "pass".into())?;
     let total_size: u64 = sz
         .archive()
         .files
@@ -757,36 +776,46 @@ fn decompress_db(pb: Option<ProgressBar>) -> Result<()> {
         .map(|e| e.size())
         .sum();
 
-    let pb = if let Some(pb) = pb {
-        pb.set_length(total_size as _);
-        pb
-    } else {
-        create_progress_bar(total_size as _)
-    };
-
+    let pb = create_progress_bar(Some(total_size));
     pb.set_prefix("Decompressing Database");
 
-    let mut uncompressed_size = 0;
-    sz.for_each_entries(|_entry, reader| {
-        let mut buf = [0u8; 1024];
-        let mut file = File::create(get_db_filename()).unwrap();
-        loop {
-            let read_size = reader.read(&mut buf).unwrap();
-            if read_size == 0 {
-                break Ok(true);
-            }
-            file.write_all(&buf[..read_size])?;
-            uncompressed_size += read_size;
-
-            pb.set_position(uncompressed_size as _);
+    let mut outcome = None;
+    sz.for_each_entries(|entry, reader| {
+        if !entry.has_stream() {
+            return Ok(true);
         }
+        outcome = Some(write_atomically(db_path, reader, |pos| {
+            pb.set_position(pos)
+        }));
+        Ok(false)
+    })?;
+
+    match outcome {
+        Some(result) => Ok(result?),
+        None => bail!("archive contains no files"),
+    }
+}
+
+fn decompress_archive(archive: &Path, db_path: &Path) -> Result<()> {
+    let result = extract_database(archive, db_path);
+    // An archive that failed to unpack would fail the same way on every start.
+    let _ = std::fs::remove_file(archive);
+    result.with_context(|| {
+        format!(
+            "Failed to unpack {}; re-run with --download-database to fetch it again",
+            archive.display()
+        )
     })
-    .unwrap();
+}
 
-    // delete the compressed file
-    std::fs::remove_file(&filename)?;
+fn decompress_db() -> Result<()> {
+    let archive = PathBuf::from(format!("{}.7z", get_db_filename()));
 
-    Ok(())
+    if !archive.exists() {
+        return Ok(());
+    }
+
+    decompress_archive(&archive, Path::new(&get_db_filename()))
 }
 
 /*
@@ -1412,11 +1441,9 @@ fn main() -> Result<()> {
     let database_path = check_for_db_file();
 
     if args.download_database || database_path.is_none() {
-        let pb = download_db()?;
-        decompress_db(Some(pb))?;
-    } else {
-        decompress_db(None)?;
+        download_db()?;
     }
+    decompress_db()?;
 
     let conn = Connection::open(get_db_filename())?;
 
@@ -1606,6 +1633,10 @@ mod tests {
             let _ = std::fs::remove_dir_all(&path);
             std::fs::create_dir_all(&path).unwrap();
             Self(path)
+        }
+
+        fn path(&self, name: &str) -> PathBuf {
+            self.0.join(name)
         }
 
         fn write(&self, rel: &str, bytes: &[u8]) {
@@ -1816,5 +1847,77 @@ mod tests {
         assert_eq!(label(true, true), "(hash) (pattern_hash)");
         assert_eq!(label(true, false), "(hash)");
         assert_eq!(label(false, true), "(pattern_hash)");
+    }
+
+    struct FailingReader {
+        sent: bool,
+    }
+
+    impl Read for FailingReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.sent {
+                return Err(std::io::Error::other("connection reset"));
+            }
+            self.sent = true;
+            buf[..4].copy_from_slice(b"data");
+            Ok(4)
+        }
+    }
+
+    #[test]
+    fn write_atomically_publishes_on_success_and_replaces_stale_part() {
+        let dir = TempDir::create("write_ok");
+        let target = dir.path("out.7z");
+        std::fs::write(part_path(&target), b"stale partial").unwrap();
+
+        write_atomically(&target, &b"payload"[..], |_| {}).unwrap();
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"payload");
+        assert!(!part_path(&target).exists());
+    }
+
+    #[test]
+    fn write_atomically_leaves_no_final_file_when_reader_fails() {
+        let dir = TempDir::create("write_fail");
+        let target = dir.path("out.7z");
+
+        let result = write_atomically(&target, FailingReader { sent: false }, |_| {});
+
+        assert!(result.is_err());
+        assert!(!target.exists());
+        assert!(!part_path(&target).exists());
+    }
+
+    #[test]
+    fn decompress_corrupt_archive_keeps_existing_db() {
+        let dir = TempDir::create("decompress_corrupt");
+        let archive = dir.path("db.7z");
+        let db = dir.path("db");
+        std::fs::write(&db, b"existing database").unwrap();
+        std::fs::write(&archive, b"7z\xBC\xAF\x27\x1C truncated garbage").unwrap();
+
+        let err = decompress_archive(&archive, &db).unwrap_err();
+
+        assert!(format!("{err:#}").contains("--download-database"));
+        assert!(!archive.exists());
+        assert!(!part_path(&db).exists());
+        assert_eq!(std::fs::read(&db).unwrap(), b"existing database");
+    }
+
+    #[test]
+    fn decompress_valid_archive_replaces_db_and_removes_archive() {
+        let dir = TempDir::create("decompress_valid");
+        let src = dir.path("modland_hash.db");
+        let archive = dir.path("db.7z");
+        let db = dir.path("live.db");
+        std::fs::write(&src, b"new database contents").unwrap();
+        sevenz_rust::compress_to_path(&src, &archive).unwrap();
+        std::fs::write(&db, b"old").unwrap();
+
+        decompress_archive(&archive, &db).unwrap();
+
+        assert_eq!(std::fs::read(&db).unwrap(), b"new database contents");
+        assert!(!archive.exists());
+        assert!(!part_path(&db).exists());
     }
 }
