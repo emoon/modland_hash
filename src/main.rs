@@ -1,8 +1,8 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressState, ProgressStyle};
 use rayon::prelude::*;
-use regex::Regex;
+use regex::{Regex, RegexBuilder};
 use rusqlite::{params, types::ValueRef, Connection};
 use sha2::Digest;
 use simple_logger::SimpleLogger;
@@ -12,12 +12,13 @@ use std::{
     fs::File,
     hash::{Hash, Hasher},
     io::{Read, Write},
-    os::raw::c_char,
+    os::raw::{c_char, c_int},
     path::{Path, PathBuf},
 };
 
 use walkdir::WalkDir;
 
+static TOOL_NAME: &str = "modland_hash";
 static DB_FILENAME: &str = "modland_hash.db";
 static DB_REMOTE: &str = "https://www.dropbox.com/scl/fi/gtk2yri6iizlaeb6b0j0j/modland_hash.db.7z?rlkey=axcrqv54eg2c1yju6vf043ly1&dl=1";
 
@@ -62,6 +63,8 @@ impl CSampleData {
         if self.data.is_null() || self.length == 0 {
             None
         } else {
+            // SAFETY: `data` is non-null and points at `length` bytes owned by the module,
+            // which outlives `self` (freed only by free_hash_data after use).
             unsafe { Some(std::slice::from_raw_parts(self.data, self.length as _)) }
         }
     }
@@ -75,48 +78,44 @@ impl CSampleData {
 struct CData {
     hash: u64,
     samples: *const CSampleData,
-    instrument_names: *const *const c_char,
-    sample_count: u32,
-    instrument_count: u32,
-    channel_count: u32,
+    _instrument_names: *const *const c_char,
+    sample_count: c_int,
+    _instrument_count: c_int,
+    channel_count: c_int,
 }
 
 impl CData {
     fn get_samples(&self) -> &[CSampleData] {
-        unsafe { std::slice::from_raw_parts(self.samples, self.sample_count as _) }
-    }
-
-    fn get_instrument_names(&self) -> Vec<String> {
-        let mut output = Vec::new();
-        for i in 0..self.instrument_count {
-            let name = unsafe { get_string_cstr(*self.instrument_names.offset(i as _)) };
-            output.push(name);
+        let count = usize::try_from(self.sample_count).unwrap_or(0);
+        if self.samples.is_null() || count == 0 {
+            return &[];
         }
-        output
+        // SAFETY: `samples` is non-null and hash_file allocated `sample_count` initialized
+        // entries, which stay valid until free_hash_data.
+        unsafe { std::slice::from_raw_parts(self.samples, count) }
     }
 }
 
 extern "C" {
-    fn hash_file(data: *const u8, len: u32, dump_patterns: i32) -> *const CData;
+    fn hash_file(data: *const u8, len: usize, dump_patterns: i32) -> *const CData;
     fn free_hash_data(data: *const CData);
 }
 
 fn get_string_cstr(c: *const c_char) -> String {
+    if c.is_null() {
+        return String::new();
+    }
+    // SAFETY: `c` is non-null and points at a NUL-terminated string owned by the module.
     match unsafe { std::ffi::CStr::from_ptr(c).to_str() } {
-        //Ok(s) => if s.is_empty() { String::new() } else { format!("'{}'", s.to_owned()) },
-        Ok(s) => {
-            let t = s.replace('\'', "''");
-            format!("'{}'", t)
-        }
-
-        Err(_) => "''".to_string(),
+        Ok(s) => s.to_owned(),
+        Err(_) => String::new(),
     }
 }
 
 #[derive(Clone)]
 struct SampleInfo {
     sample_id: u32,
-    sha256_hash: String,
+    sha256_hash: Option<String>,
     text: String,
     length_bytes: usize,
     length: usize,
@@ -128,7 +127,6 @@ struct TrackInfo {
     sha256_hash: String,
     filename: String,
     samples: Vec<SampleInfo>,
-    instrument_names: Vec<String>,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -183,7 +181,7 @@ struct Args {
     #[clap(long)]
     find_samples_with_length_bytes: Option<usize>,
 
-    /// Skips files with these extensions if any duplicates are found. Example: --skip-file-extensions "mdx,pdx" will skip all duplicates that contain .mdx and .pdx files (case-insensitive)
+    /// Skips files with these extensions if any duplicates are found. Example: --exclude-file-extensions "mdx,pdx" will skip all duplicates that contain .mdx and .pdx files (case-insensitive)
     #[clap(long, default_value = "")]
     exclude_file_extensions: String,
 
@@ -235,46 +233,50 @@ struct Filters {
 
 impl Filters {
     fn init_filter(filter: &str, prefix: &str) -> Vec<String> {
-        if filter.is_empty() {
-            return Vec::new();
-        }
-
-        let mut output = Vec::new();
-
-        for t in filter.split(',') {
-            output.push(format!("{}{}", prefix, t));
-        }
-
-        output
+        filter
+            .split(',')
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(|t| format!("{}{}", prefix, t))
+            .collect()
     }
 
-    fn new(args: &Args) -> Filters {
-        let sample_search = if !args.include_sample_name.is_empty() {
-            Some(Regex::new(&args.include_sample_name.to_ascii_lowercase()).unwrap())
-        } else {
-            None
-        };
+    // Stored URLs are percent-encoded, so path filters must be too.
+    fn init_path_filter(filter: &str) -> Vec<String> {
+        Self::init_filter(&filter.to_ascii_lowercase(), "")
+            .iter()
+            .map(|p| get_stored_url(p))
+            .collect()
+    }
 
-        let search_filename = if !args.search_filename.is_empty() {
-            Some(Regex::new(&args.search_filename.to_ascii_lowercase()).unwrap())
-        } else {
-            None
-        };
+    fn init_regex(pattern: &str) -> Result<Option<Regex>> {
+        if pattern.is_empty() {
+            return Ok(None);
+        }
 
-        Filters {
-            include_paths: Self::init_filter(&args.include_paths.to_ascii_lowercase(), ""),
+        let re = RegexBuilder::new(pattern)
+            .case_insensitive(true)
+            .build()
+            .with_context(|| format!("Invalid regex \"{}\"", pattern))?;
+
+        Ok(Some(re))
+    }
+
+    fn new(args: &Args) -> Result<Filters> {
+        Ok(Filters {
+            include_paths: Self::init_path_filter(&args.include_paths),
             include_file_extensions: Self::init_filter(
                 &args.include_file_extensions.to_ascii_lowercase(),
                 ".",
             ),
-            exclude_paths: Self::init_filter(&args.exclude_paths.to_ascii_lowercase(), ""),
+            exclude_paths: Self::init_path_filter(&args.exclude_paths),
             exclude_file_extensions: Self::init_filter(
                 &args.exclude_file_extensions.to_ascii_lowercase(),
                 ".",
             ),
-            sample_search,
-            search_filename,
-        }
+            sample_search: Self::init_regex(&args.include_sample_name)?,
+            search_filename: Self::init_regex(&args.search_filename)?,
+        })
     }
 
     fn starts_with(filename: &str, tests: &[String], default_val: bool) -> bool {
@@ -313,7 +315,7 @@ impl Filters {
             let mut found_filename = false;
 
             for file in &output {
-                if re.is_match(&file.filename.to_ascii_lowercase()) {
+                if re.is_match(&file.filename) {
                     found_filename = true;
                     break;
                 }
@@ -327,7 +329,7 @@ impl Filters {
         if let Some(re) = self.sample_search.as_ref() {
             for file in &output {
                 for sample in &file.samples {
-                    if re.is_match(&sample.to_ascii_lowercase()) {
+                    if re.is_match(sample) {
                         if output.len() >= skip_level {
                             return output;
                         } else {
@@ -359,19 +361,14 @@ fn get_files(path: &str, recurse: bool) -> Vec<String> {
     }
 
     // Check if "path" is a single file
-    let md = std::fs::metadata(path).unwrap();
-
-    if md.is_file() {
-        return vec![path.to_owned()];
+    match std::fs::metadata(path) {
+        Ok(md) if md.is_file() => return vec![path.to_owned()],
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("Skipping {}: {}", path, e);
+            return Vec::new();
+        }
     }
-
-    let _spinner_style = ProgressStyle::with_template("{prefix:.bold.dim} {spinner} {wide_msg}")
-        .unwrap()
-        .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈ ");
-
-    //let pb = ProgressBar::new(0);
-    //pb.set_style(spinner_style);
-    //pb.set_prefix(format!("Fetching list of files... [{}/?]", 0));
 
     let max_depth = if !recurse { 1 } else { usize::MAX };
 
@@ -379,22 +376,29 @@ fn get_files(path: &str, recurse: bool) -> Vec<String> {
         .max_depth(max_depth)
         .into_iter()
         .filter_map(|e| {
-            let file = e.unwrap();
-            let metadata = file.metadata().unwrap();
-
-            if let Some(filename) = file.path().to_str() {
-                if metadata.is_file()
-                    && !filename.ends_with(".listing")
-                    && !filename.contains("modland_hash")
-                {
-                    //pb.set_message(filename.to_owned());
-                    return Some(filename.to_owned());
+            let file = match e {
+                Ok(file) => file,
+                Err(e) => {
+                    let path = e.path().unwrap_or(Path::new(path));
+                    eprintln!("Skipping {}: {}", path.display(), e);
+                    return None;
                 }
+            };
+
+            let filename = file.path().to_str()?;
+            if file.file_type().is_file() && should_scan(&file.file_name().to_string_lossy()) {
+                return Some(filename.to_owned());
             }
             None
         })
         .collect();
     files
+}
+
+// The tool's own files (executable, database, archive, temp files) all carry its name and may
+// sit in the scanned directory; they are never input.
+fn should_scan(file_name: &str) -> bool {
+    !file_name.contains(TOOL_NAME) && !file_name.ends_with(".listing")
 }
 
 fn get_url(filename: &str) -> String {
@@ -408,20 +412,35 @@ fn get_stored_url(filename: &str) -> String {
     filename.replace('\'', "%27")
 }
 
+// Name stored in the database: the path below `root`, `/`-separated with a leading `/`.
+fn get_stored_name(root: &str, path: &str) -> String {
+    let path = Path::new(path);
+    let relative = match path.strip_prefix(root) {
+        // The root is the file itself.
+        Ok(rest) if rest.as_os_str().is_empty() => path.file_name().map(Path::new),
+        Ok(rest) => Some(rest),
+        Err(_) => None,
+    };
+    let relative = relative.unwrap_or(path);
+
+    relative
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(name) => Some(name.to_string_lossy()),
+            _ => None,
+        })
+        .fold(String::new(), |name, part| format!("{}/{}", name, part))
+}
+
 // Fetches info for a track/song
-fn get_track_info(filename: &str, dump_patterns: bool) -> TrackInfo {
+fn get_track_info(filename: &str, dump_patterns: bool) -> Result<TrackInfo> {
     // Calculate sha256 of the file
-    let mut file = File::open(filename).unwrap();
-    let mut file_data = Vec::new();
-    file.read_to_end(&mut file_data).unwrap();
+    let file_data = std::fs::read(filename)?;
     let hash = sha2::Sha256::digest(&file_data);
     let dump_patterns = if dump_patterns { 1 } else { 0 };
 
-    let song_data = unsafe { hash_file(file_data.as_ptr(), file_data.len() as _, dump_patterns) };
-
-    if unsafe { (*song_data).hash } == 1 {
-        println!("Song with 0x1ff detected: {}", filename);
-    }
+    // SAFETY: the pointer/length pair describes `file_data`, which outlives the call.
+    let song_data = unsafe { hash_file(file_data.as_ptr(), file_data.len(), dump_patterns) };
 
     let mut track_info = TrackInfo {
         filename: filename.to_owned(),
@@ -430,17 +449,20 @@ fn get_track_info(filename: &str, dump_patterns: bool) -> TrackInfo {
     };
 
     if !song_data.is_null() {
-        let hash_id = unsafe { (*song_data).hash };
-        let samples = unsafe { (*song_data).get_samples() };
+        // SAFETY: `song_data` is non-null and stays valid until free_hash_data below.
+        let song = unsafe { &*song_data };
+        let hash_id = song.hash;
+        let samples = song.get_samples();
         track_info.pattern_hash = hash_id;
 
+        if hash_id == 1 {
+            println!("Song with 0x1ff detected: {}", filename);
+        }
+
         for sample in samples {
-            let sha256_hash = if let Some(data) = sample.get_data() {
-                let hash = sha2::Sha256::digest(data);
-                format!("'{:x}'", hash)
-            } else {
-                "NULL".to_string()
-            };
+            let sha256_hash = sample
+                .get_data()
+                .map(|data| format!("{:x}", sha2::Sha256::digest(data)));
 
             track_info.samples.push(SampleInfo {
                 sample_id: sample.sample_id,
@@ -451,20 +473,12 @@ fn get_track_info(filename: &str, dump_patterns: bool) -> TrackInfo {
             });
         }
 
-        let instrument_names = unsafe { (*song_data).get_instrument_names() };
-
-        for name in instrument_names {
-            track_info.instrument_names.push(name);
-        }
-
-        //let sample_names = unsafe { get_string_cstr((*song_data).sample_names) };
-        //track_info.sample_names = sample_names;
-        //track_info.pattern_hash = hash_id;
-
+        // SAFETY: `song_data` came from hash_file, is freed exactly once, and `song` and
+        // `samples` are not used afterwards.
         unsafe { free_hash_data(song_data) };
     }
 
-    track_info
+    Ok(track_info)
 }
 
 // Get the target filename
@@ -475,9 +489,48 @@ fn get_db_filename() -> String {
     path.into_os_string().into_string().unwrap()
 }
 
+fn get_archive_filename() -> PathBuf {
+    PathBuf::from(format!("{}.7z", get_db_filename()))
+}
+
 enum DbCommand {
-    Insert(String), // Example command to insert a string
-    Quit,           // Example command to query a string
+    Insert { song_id: usize, track: TrackInfo },
+    Quit,
+}
+
+// The DB only stores the lower 63 bits; 0 means "no pattern hash"
+fn stored_pattern_hash(pattern_hash: u64) -> Option<i64> {
+    let masked = pattern_hash & 0x7FFF_FFFF_FFFF_FFFF;
+    (masked != 0).then_some(masked as i64)
+}
+
+fn insert_track(conn: &Connection, song_id: usize, track: &TrackInfo) -> Result<()> {
+    conn.prepare_cached(
+        "INSERT INTO files (song_id, hash_id, pattern_hash, url) VALUES (?1, ?2, ?3, ?4)",
+    )?
+    .execute(params![
+        song_id,
+        track.sha256_hash,
+        stored_pattern_hash(track.pattern_hash),
+        get_stored_url(&track.filename)
+    ])?;
+
+    let mut stmnt = conn.prepare_cached(
+        "INSERT INTO samples (hash_id, song_id, song_sample_id, text, length_bytes, length) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+    )?;
+
+    for sample in &track.samples {
+        stmnt.execute(params![
+            sample.sha256_hash,
+            song_id,
+            sample.sample_id,
+            sample.text,
+            sample.length_bytes,
+            sample.length
+        ])?;
+    }
+
+    Ok(())
 }
 
 fn run_build_db_thread(filename: String, rx: Receiver<DbCommand>) -> Result<()> {
@@ -495,21 +548,6 @@ fn run_build_db_thread(filename: String, rx: Receiver<DbCommand>) -> Result<()> 
         [],
     )
     .unwrap();
-
-    /*
-        c5_speed INTEGER,
-        pan INTEGER,
-        volume INTEGER,
-        global_vol INTEGER,
-        stereo INTEGER,
-        sample_bits INTEGER,
-        relative_tone INTEGER,
-        fine_tune INTEGER,
-        vibrato_type INTEGER,
-        vibrato_sweep INTEGER,
-        vibrato_depth INTEGER,
-        vibrato_rate INTEGER,
-    */
 
     conn.execute(
         "CREATE TABLE samples (
@@ -539,9 +577,7 @@ fn run_build_db_thread(filename: String, rx: Receiver<DbCommand>) -> Result<()> 
     // Listen for commands
     for command in rx {
         match command {
-            DbCommand::Insert(cmd) => {
-                conn.execute(&cmd, [])?;
-            }
+            DbCommand::Insert { song_id, track } => insert_track(&conn, song_id, &track)?,
             DbCommand::Quit => break,
         }
     }
@@ -569,47 +605,25 @@ fn build_database(out_filename: &str, database_path: &str, args: &Args) {
 
     let files = get_files(database_path, args.recursive);
 
-    let _spinner_style =
-        ProgressStyle::with_template("{prefix:.bold.dim} {wide_bar} {pos}/{len}").unwrap();
+    files
+        .par_iter()
+        .enumerate()
+        .for_each(|(index, input_path)| {
+            let mut track = match get_track_info(input_path, args.dump_patterns) {
+                Ok(track) => track,
+                Err(e) => {
+                    eprintln!("Skipping {}: {}", input_path, e);
+                    return;
+                }
+            };
+            track.filename = get_stored_name(database_path, input_path);
 
-    //let pb = ProgressBar::new(files.len() as _);
-    //pb.set_style(spinner_style);
-
-    //pb.set_prefix("Building database");
-
-    files.par_iter().enumerate().for_each(|(index, input_path)| {
-        let mut track = get_track_info(input_path, args.dump_patterns);
-        track.filename = input_path.replace(database_path, "");
-
-        let t = track.pattern_hash & 0x7FFF_FFFF_FFFF_FFFF;
-        let pattern_hash = if t != 0 {
-            format!("{}", t)
-        } else {
-            "NULL".to_string()
-        };
-
-        let insert = format!("INSERT INTO files (song_id, hash_id, pattern_hash, url) VALUES ({}, '{}', {}, '{}')", 
-                index,
-                &track.sha256_hash,
-                pattern_hash,
-                get_stored_url(&track.filename));
-
-        tx.send(DbCommand::Insert(insert)).expect("Failed to send command");
-
-        for sample in &track.samples {
-            let insert = format!("INSERT INTO samples (hash_id, song_id, song_sample_id, text, length_bytes, length) VALUES ({}, {}, {}, {}, {}, {})", 
-                &sample.sha256_hash,
-                index,
-                sample.sample_id,
-                &sample.text,
-                sample.length_bytes,
-                sample.length);
-
-            tx.send(DbCommand::Insert(insert)).expect("Failed to send command");
-        }
-
-        //pb.inc(1);
-    });
+            tx.send(DbCommand::Insert {
+                song_id: index,
+                track,
+            })
+            .expect("Failed to send command");
+        });
 
     println!("Writing database...");
 
@@ -619,20 +633,96 @@ fn build_database(out_filename: &str, database_path: &str, args: &Args) {
     println!("Done");
 }
 
-fn create_db_file(filename: &str) -> Result<File> {
-    if let Ok(file) = File::create(filename) {
-        return Ok(file);
-    }
-
-    bail!(
-        "Tried to create database at {} but was unable to do so. Manually download {} and place it next to the modland_has executable",
-        filename, DB_REMOTE,
-    )
+fn part_path(path: &Path) -> PathBuf {
+    let mut part = path.as_os_str().to_owned();
+    part.push(".part");
+    PathBuf::from(part)
 }
 
-fn create_progress_bar(len: usize) -> ProgressBar {
-    let pb = ProgressBar::new(len as _);
-    //pb.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+// Which side of a copy failed: callers treat a bad source differently from a full disk.
+#[derive(Debug)]
+enum CopyError {
+    Source(std::io::Error),
+    Dest(std::io::Error),
+}
+
+impl std::fmt::Display for CopyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            CopyError::Source(e) => write!(f, "read failed: {}", e),
+            CopyError::Dest(e) => write!(f, "write failed: {}", e),
+        }
+    }
+}
+
+impl std::error::Error for CopyError {}
+
+// `final_path` only ever appears fully written: data goes to `<final_path>.part` first.
+// Writes and syncs the `.part` file and returns the bytes written; a failure removes it.
+fn write_part(
+    final_path: &Path,
+    mut reader: impl Read,
+    mut on_progress: impl FnMut(u64),
+) -> Result<u64, CopyError> {
+    let part = part_path(final_path);
+    let mut copy = || -> Result<u64, CopyError> {
+        let mut file = File::create(&part).map_err(CopyError::Dest)?;
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut written = 0u64;
+        loop {
+            let read_size = reader.read(&mut buf).map_err(CopyError::Source)?;
+            if read_size == 0 {
+                break;
+            }
+            file.write_all(&buf[..read_size]).map_err(CopyError::Dest)?;
+            written += read_size as u64;
+            on_progress(written);
+        }
+        // The rename must not become durable before the data.
+        file.sync_all().map_err(CopyError::Dest)?;
+        Ok(written)
+    };
+
+    let result = copy();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&part);
+    }
+    result
+}
+
+// Renames `<final_path>.part` over `final_path`; a failure removes the `.part` file.
+fn publish_part(final_path: &Path) -> Result<(), CopyError> {
+    let part = part_path(final_path);
+    let publish = || -> std::io::Result<()> {
+        // Replacing a file must not reset its mode to the umask default.
+        if let Ok(existing) = std::fs::metadata(final_path) {
+            std::fs::set_permissions(&part, existing.permissions())?;
+        }
+        std::fs::rename(&part, final_path)
+    };
+    let result = publish().map_err(CopyError::Dest);
+    if result.is_err() {
+        let _ = std::fs::remove_file(&part);
+    }
+    result
+}
+
+fn write_atomically(
+    final_path: &Path,
+    reader: impl Read,
+    on_progress: impl FnMut(u64),
+) -> Result<(), CopyError> {
+    write_part(final_path, reader, on_progress)?;
+    publish_part(final_path)
+}
+
+fn create_progress_bar(len: Option<u64>) -> ProgressBar {
+    let Some(len) = len else {
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(ProgressStyle::with_template("{prefix} [{elapsed_precise}] {bytes}").unwrap());
+        return pb;
+    };
+    let pb = ProgressBar::new(len);
     pb.set_style(
         ProgressStyle::with_template(
             "{prefix} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})",
@@ -650,47 +740,34 @@ fn create_progress_bar(len: usize) -> ProgressBar {
 }
 
 // Download and upack the database
-fn download_db() -> Result<ProgressBar> {
-    let filename = format!("{}.7z", get_db_filename());
-    let mut file = create_db_file(&filename)?;
+fn download_db() -> Result<()> {
+    let filename = get_archive_filename();
 
     let resp = ureq::get(DB_REMOTE).call()?;
-    let len: usize = resp.header("Content-Length").unwrap().parse()?;
-
-    let mut temp_buffer: [u8; 1024] = [0; 1024];
-    let mut reader = resp.into_reader();
+    let len = resp
+        .header("Content-Length")
+        .and_then(|v| v.parse::<u64>().ok());
 
     let pb = create_progress_bar(len);
-
     pb.set_prefix("Downloading Database");
 
-    let mut pos = 0;
+    write_atomically(&filename, resp.into_reader(), |pos| pb.set_position(pos)).with_context(
+        || {
+            format!(
+                "Failed to download database to {}. Manually download {} and place it next to the modland_hash executable",
+                filename.display(),
+                DB_REMOTE,
+            )
+        },
+    )?;
 
-    loop {
-        let read_size = reader.read(&mut temp_buffer)?;
-
-        if read_size == 0 {
-            break;
-        }
-
-        pb.set_position(pos);
-        pos += read_size as u64;
-
-        file.write_all(&temp_buffer[0..read_size])?;
-    }
-
-    Ok(pb)
+    pb.finish_and_clear();
+    Ok(())
 }
 
-fn decompress_db(pb: Option<ProgressBar>) -> Result<()> {
-    let filename = format!("{}.7z", get_db_filename());
-
-    // Check if compressed file exists and unpack it
-    if !Path::new(&filename).exists() {
-        return Ok(());
-    }
-
-    let mut sz = sevenz_rust::SevenZReader::open(&filename, "pass".into()).unwrap();
+// The archive holds the database as its only file; the first entry with data is used.
+fn extract_database(archive: &Path, db_path: &Path) -> Result<()> {
+    let mut sz = sevenz_rust::SevenZReader::open(archive, "pass".into())?;
     let total_size: u64 = sz
         .archive()
         .files
@@ -699,56 +776,88 @@ fn decompress_db(pb: Option<ProgressBar>) -> Result<()> {
         .map(|e| e.size())
         .sum();
 
-    let pb = if let Some(pb) = pb {
-        pb.set_length(total_size as _);
-        pb
-    } else {
-        create_progress_bar(total_size as _)
-    };
-
+    let pb = create_progress_bar(Some(total_size));
     pb.set_prefix("Decompressing Database");
 
-    let mut uncompressed_size = 0;
-    sz.for_each_entries(|_entry, reader| {
-        let mut buf = [0u8; 1024];
-        let mut file = File::create(get_db_filename()).unwrap();
-        loop {
-            let read_size = reader.read(&mut buf).unwrap();
-            if read_size == 0 {
-                break Ok(true);
-            }
-            file.write_all(&buf[..read_size])?;
-            uncompressed_size += read_size;
-
-            pb.set_position(uncompressed_size as _);
+    let mut outcome = None;
+    let iterated = sz.for_each_entries(|entry, reader| {
+        // Returning false only ends the current block, so later blocks still call back.
+        if outcome.is_some() || !entry.has_stream() {
+            return Ok(true);
         }
-    })
-    .unwrap();
-
-    // delete the compressed file
-    std::fs::remove_file(&filename)?;
-
-    Ok(())
-}
-
-/*
-    let re = Regex::new(search_string).unwrap();
-    let mut count = 0;
-
-    tracks.iter().for_each(|track| {
-        if let Some(metadata) = track.metadata.as_ref() {
-            if re.is_match(&metadata.sample_names.to_ascii_lowercase()) {
-                println!("===============================================================");
-                println!("Matching {}", track.filename);
-                println!("{}", metadata.sample_names);
-                count += 1;
-            }
-        }
+        let written = write_part(db_path, reader, |pos| pb.set_position(pos));
+        outcome = Some((entry.size(), written));
+        Ok(false)
     });
 
-    println!("Total matches {}", count);
+    // Later blocks are only decoded after the callback returned, so they can still fail.
+    if let Err(e) = iterated {
+        let _ = std::fs::remove_file(part_path(db_path));
+        return Err(e.into());
+    }
+
+    match outcome {
+        Some((expected, written)) => {
+            if let Err(e) = check_complete(written?, expected) {
+                let _ = std::fs::remove_file(part_path(db_path));
+                return Err(e.into());
+            }
+            Ok(publish_part(db_path)?)
+        }
+        None => bail!("archive contains no files"),
+    }
 }
-     */
+
+// A stream that ends early reads as a clean EOF, so the length is the only way to notice.
+fn check_complete(written: u64, expected: u64) -> Result<(), CopyError> {
+    if written == expected {
+        return Ok(());
+    }
+    Err(CopyError::Source(std::io::Error::new(
+        std::io::ErrorKind::UnexpectedEof,
+        format!("expected {expected} bytes but the archive yielded {written}"),
+    )))
+}
+
+fn decompress_archive(archive: &Path, db_path: &Path) -> Result<()> {
+    let result = extract_database(archive, db_path);
+
+    let archive_is_usable = matches!(
+        result.as_ref().map_err(|e| e.downcast_ref::<CopyError>()),
+        Err(Some(CopyError::Dest(_)))
+    );
+    if archive_is_usable {
+        return result.with_context(|| {
+            format!(
+                "Failed to write {}; {} was kept and is unpacked on the next run",
+                db_path.display(),
+                archive.display()
+            )
+        });
+    }
+
+    // A broken archive would fail the same way on every start.
+    let removed = std::fs::remove_file(archive);
+    if result.is_ok() {
+        return removed.with_context(|| format!("Failed to remove {}", archive.display()));
+    }
+    result.with_context(|| {
+        format!(
+            "Failed to unpack {}; re-run with --download-database to fetch it again",
+            archive.display()
+        )
+    })
+}
+
+fn decompress_db() -> Result<()> {
+    let archive = get_archive_filename();
+
+    if !archive.exists() {
+        return Ok(());
+    }
+
+    decompress_archive(&archive, Path::new(&get_db_filename()))
+}
 
 fn get_samples_from_song_id(db: &Connection, song_id: u64) -> Result<Vec<String>> {
     let mut samples = Vec::new();
@@ -784,11 +893,9 @@ fn get_files_from_sha_hash(info: &TrackInfo, db: &Connection) -> Result<Vec<Data
 fn get_files_from_pattern_hash(info: &TrackInfo, db: &Connection) -> Result<Vec<DatabaseMeta>> {
     let mut entries = Vec::new();
 
-    if info.pattern_hash == 0 {
+    let Some(pattern_hash) = stored_pattern_hash(info.pattern_hash) else {
         return Ok(entries);
-    }
-
-    let pattern_hash = info.pattern_hash & 0x7FFF_FFFF_FFFF_FFFF;
+    };
 
     let mut stmnt = db.prepare("SELECT song_id, url FROM files WHERE pattern_hash = :hash")?;
     let mut rows = stmnt.query(&[(":hash", &pattern_hash)])?;
@@ -839,7 +946,7 @@ fn print_samples_with_outline(samples: &[String], match_reg: &Option<Regex>) {
         }
 
         if let Some(re) = match_reg.as_ref() {
-            if re.is_match(&line.to_ascii_lowercase()) {
+            if re.is_match(line) {
                 println!("│ << regex ({}) match!", re.as_str());
             } else {
                 println!("│");
@@ -861,9 +968,24 @@ fn print_samples_with_outline(samples: &[String], match_reg: &Option<Regex>) {
     println!("┘");
 }
 
+struct MatchKind {
+    hash: bool,
+    pattern_hash: bool,
+}
+
+impl MatchKind {
+    fn label(&self) -> &'static str {
+        match (self.hash, self.pattern_hash) {
+            (true, true) => "(hash) (pattern_hash)",
+            (true, false) => "(hash)",
+            _ => "(pattern_hash)",
+        }
+    }
+}
+
 fn print_found_entries(
     inital_samples: &[String],
-    entries: &HashMap<&DatabaseMeta, (bool, bool)>,
+    entries: &HashMap<&DatabaseMeta, MatchKind>,
     args: &Args,
     search_sample: &Option<Regex>,
 ) {
@@ -876,21 +998,15 @@ fn print_found_entries(
 
     vals.sort_by(|a, b| a.0.filename.cmp(&b.0.filename));
 
-    for val in &vals {
-        let url = get_url(&val.0.filename);
+    for (meta, kind) in &vals {
+        let url = get_url(&meta.filename);
+        if args.print_sample_names && !printed_initial_samples {
+            print_samples_with_outline(inital_samples, search_sample);
+            printed_initial_samples = true;
+        }
+        println!("Found match {} {}", url, kind.label());
         if args.print_sample_names {
-            if !printed_initial_samples && args.print_sample_names {
-                print_samples_with_outline(inital_samples, search_sample);
-                printed_initial_samples = true;
-            }
-            println!("Found match {} (pattern_hash)", url);
-            print_samples_with_outline(&val.0.samples, search_sample);
-        } else if val.1 .0 && val.1 .1 {
-            println!("Found match {} (hash) (pattern_hash)", url);
-        } else if val.1 .0 && !val.1 .1 {
-            println!("Found match {} (hash)", url);
-        } else {
-            println!("Found match {} (pattern_hash)", url);
+            print_samples_with_outline(&meta.samples, search_sample);
         }
     }
 
@@ -899,13 +1015,17 @@ fn print_found_entries(
     }
 }
 
-fn match_dir_against_db(dir: &str, args: &Args, db: &Connection) -> Result<()> {
+fn match_dir_against_db(dir: &str, args: &Args, filters: &Filters, db: &Connection) -> Result<()> {
     let files = get_files(dir, args.recursive);
-    let filters = Filters::new(args);
 
-    //files.par_iter().for_each(|filename| {
     for filename in files {
-        let info = get_track_info(&filename, args.dump_patterns);
+        let info = match get_track_info(&filename, args.dump_patterns) {
+            Ok(info) => info,
+            Err(e) => {
+                eprintln!("Skipping {}: {}", filename, e);
+                continue;
+            }
+        };
 
         println!("Matching {}", filename);
 
@@ -918,15 +1038,23 @@ fn match_dir_against_db(dir: &str, args: &Args, db: &Connection) -> Result<()> {
         let mut found_entries = HashMap::new();
 
         for entry in &filenames {
-            found_entries.insert(entry, (true, false));
+            found_entries.insert(
+                entry,
+                MatchKind {
+                    hash: true,
+                    pattern_hash: false,
+                },
+            );
         }
 
         for entry in &filenames_pattern {
-            if let Some(v) = found_entries.get_mut(entry) {
-                v.1 = true;
-            } else {
-                found_entries.insert(entry, (false, true));
-            }
+            found_entries
+                .entry(entry)
+                .or_insert(MatchKind {
+                    hash: false,
+                    pattern_hash: true,
+                })
+                .pattern_hash = true;
         }
 
         let sample_names: Vec<String> = info.samples.iter().map(|s| s.text.to_owned()).collect();
@@ -956,7 +1084,13 @@ fn match_samples(dir: &str, db: &Connection, args: &Args) -> Result<()> {
     let files = get_files(dir, args.recursive);
 
     for filename in files {
-        let info = get_track_info(&filename, args.dump_patterns);
+        let info = match get_track_info(&filename, args.dump_patterns) {
+            Ok(info) => info,
+            Err(e) => {
+                eprintln!("Skipping {}: {}", filename, e);
+                continue;
+            }
+        };
         let mut top_samples = Vec::new();
 
         if info.samples.is_empty() {
@@ -976,13 +1110,11 @@ fn match_samples(dir: &str, db: &Connection, args: &Args) -> Result<()> {
             let mut matching_data = Vec::new();
 
             if sample.length_bytes > 0 {
-                let statement = format!("
-                    SELECT song_sample_id, text, files.url 
-                    FROM samples JOIN files ON samples.song_id = files.song_id WHERE samples.hash_id = {}",
-                    sample.sha256_hash);
-
-                let mut stmnt = db.prepare(&statement)?;
-                let mut rows = stmnt.query([])?;
+                let mut stmnt = db.prepare(
+                    "SELECT song_sample_id, text, files.url
+                    FROM samples JOIN files ON samples.song_id = files.song_id WHERE samples.hash_id = ?1",
+                )?;
+                let mut rows = stmnt.query([&sample.sha256_hash])?;
 
                 while let Some(row) = rows.next()? {
                     let sample_id: i64 = row.get(0)?;
@@ -999,11 +1131,7 @@ fn match_samples(dir: &str, db: &Connection, args: &Args) -> Result<()> {
                 }
             }
 
-            print!(
-                "{:02} {}",
-                sample.sample_id,
-                &sample.text[1..sample.text.len() - 1]
-            );
+            print!("{:02} {}", sample.sample_id, sample.text);
 
             for _ in sample.text.chars().count()..max_len - 1 {
                 print!(" ");
@@ -1062,7 +1190,7 @@ fn match_samples(dir: &str, db: &Connection, args: &Args) -> Result<()> {
     Ok(())
 }
 
-// First check if we have a database next to the to the exe, otherwise try local directory
+// Checks for a database next to the exe
 fn check_for_db_file() -> Option<PathBuf> {
     let path = Path::new(&get_db_filename()).to_path_buf();
     if path.exists() {
@@ -1075,12 +1203,12 @@ fn check_for_db_file() -> Option<PathBuf> {
 fn get_dupes(
     db: &Connection,
     args: &Args,
+    filters: &Filters,
     get_songs_query: &str,
     get_by_id: &str,
     dupe_limit: usize,
 ) -> Result<Vec<Vec<DatabaseMeta>>> {
-    let mut hash_dupes = Vec::with_capacity(700_0000);
-    let filters = Filters::new(args);
+    let mut hash_dupes = Vec::new();
 
     let mut stmnt = db.prepare(get_songs_query)?;
     let mut rows = stmnt.query([])?;
@@ -1157,12 +1285,11 @@ fn get_dupes(
     Ok(hash_dupes)
 }
 
-fn print_db_duplicates(db: &Connection, args: &Args) -> Result<()> {
-    let filters = Filters::new(args);
-
+fn print_db_duplicates(db: &Connection, args: &Args, filters: &Filters) -> Result<()> {
     let hash_dupes = get_dupes(
         db,
         args,
+        filters,
         "SELECT hash_id FROM files",
         "SELECT song_id, url FROM files where hash_id = ?",
         1,
@@ -1171,6 +1298,7 @@ fn print_db_duplicates(db: &Connection, args: &Args) -> Result<()> {
     let pattern_dupes = get_dupes(
         db,
         args,
+        filters,
         "SELECT pattern_hash FROM files",
         "SELECT song_id, url FROM files where pattern_hash = ?",
         1,
@@ -1205,18 +1333,17 @@ fn print_db_duplicates(db: &Connection, args: &Args) -> Result<()> {
     Ok(())
 }
 
-fn print_db(db: &Connection, args: &Args) -> Result<()> {
-    let filters = Filters::new(args);
-
+fn print_db(db: &Connection, args: &Args, filters: &Filters) -> Result<()> {
     let entries = get_dupes(
         db,
         args,
+        filters,
         "SELECT hash_id FROM files",
         "SELECT song_id, url FROM files where hash_id = ?",
         0,
     )?;
 
-    for (_index, v) in entries.iter().enumerate() {
+    for v in entries.iter() {
         for e in v {
             println!("{}", get_url(&e.filename));
 
@@ -1229,23 +1356,17 @@ fn print_db(db: &Connection, args: &Args) -> Result<()> {
     Ok(())
 }
 
-fn print_sample_rows(rows: &mut rusqlite::Rows, args: &Args) -> Result<()> {
+fn print_sample_rows(rows: &mut rusqlite::Rows, filters: &Filters) -> Result<()> {
     let mut data = Vec::with_capacity(1024);
     let mut max_len = 0;
-
-    let sample_search = if !args.include_sample_name.is_empty() {
-        Some(Regex::new(&args.include_sample_name.to_ascii_lowercase()).unwrap())
-    } else {
-        None
-    };
 
     while let Some(row) = rows.next()? {
         let sample_id: i64 = row.get(0)?;
         let text: String = row.get(1)?;
         let url: String = row.get(2)?;
 
-        if let Some(re) = sample_search.as_ref() {
-            if !re.is_match(&text.to_ascii_lowercase()) {
+        if let Some(re) = filters.sample_search.as_ref() {
+            if !re.is_match(&text) {
                 continue;
             }
         }
@@ -1283,32 +1404,28 @@ fn print_sample_rows(rows: &mut rusqlite::Rows, args: &Args) -> Result<()> {
     Ok(())
 }
 
-fn match_db_with_sample_length(db: &Connection, args: &Args, length: usize) -> Result<()> {
-    let statement = format!(
-        "
-        SELECT song_sample_id, text, files.url 
-        FROM samples JOIN files ON samples.song_id = files.song_id WHERE samples.length = {}",
-        length
-    );
+fn match_db_with_sample_length(db: &Connection, filters: &Filters, length: usize) -> Result<()> {
+    let mut stmnt = db.prepare(
+        "SELECT song_sample_id, text, files.url
+        FROM samples JOIN files ON samples.song_id = files.song_id WHERE samples.length = ?1",
+    )?;
+    let mut rows = stmnt.query([length])?;
 
-    let mut stmnt = db.prepare(&statement)?;
-    let mut rows = stmnt.query([])?;
-
-    print_sample_rows(&mut rows, args)
+    print_sample_rows(&mut rows, filters)
 }
 
-fn match_db_with_sample_length_bytes(db: &Connection, args: &Args, length: usize) -> Result<()> {
-    let statement = format!(
-        "
-        SELECT song_sample_id, text, files.url 
-        FROM samples JOIN files ON samples.song_id = files.song_id WHERE samples.length_bytes = {}",
-        length
-    );
+fn match_db_with_sample_length_bytes(
+    db: &Connection,
+    filters: &Filters,
+    length: usize,
+) -> Result<()> {
+    let mut stmnt = db.prepare(
+        "SELECT song_sample_id, text, files.url
+        FROM samples JOIN files ON samples.song_id = files.song_id WHERE samples.length_bytes = ?1",
+    )?;
+    let mut rows = stmnt.query([length])?;
 
-    let mut stmnt = db.prepare(&statement)?;
-    let mut rows = stmnt.query([])?;
-
-    print_sample_rows(&mut rows, args)
+    print_sample_rows(&mut rows, filters)
 }
 
 fn main() -> Result<()> {
@@ -1321,6 +1438,10 @@ fn main() -> Result<()> {
     // or if the database version doesn't match
 
     if let Some(db_path) = args.build_database.as_ref() {
+        if !Path::new(db_path).exists() {
+            bail!("build path does not exist: {}", db_path);
+        }
+
         let filename = get_db_filename();
 
         if std::path::Path::new(&filename).exists() {
@@ -1332,28 +1453,28 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    let filters = Filters::new(&args)?;
+
     let database_path = check_for_db_file();
 
     if args.download_database || database_path.is_none() {
-        let pb = download_db()?;
-        decompress_db(Some(pb))?;
-    } else {
-        decompress_db(None)?;
+        download_db()?;
     }
+    decompress_db()?;
 
     let conn = Connection::open(get_db_filename())?;
 
     if let Some(len) = args.find_samples_with_length {
-        return match_db_with_sample_length(&conn, &args, len);
+        return match_db_with_sample_length(&conn, &filters, len);
     }
 
     if let Some(len) = args.find_samples_with_length_bytes {
-        return match_db_with_sample_length_bytes(&conn, &args, len);
+        return match_db_with_sample_length_bytes(&conn, &filters, len);
     }
 
     // Process duplicates in the database
     if args.list_duplicates_in_database {
-        return print_db_duplicates(&conn, &args);
+        return print_db_duplicates(&conn, &args, &filters);
     }
 
     if args.match_samples {
@@ -1362,8 +1483,666 @@ fn main() -> Result<()> {
 
     // Process duplicates in the database
     if args.list_database {
-        return print_db(&conn, &args);
+        return print_db(&conn, &args, &filters);
     }
 
-    match_dir_against_db(&args.match_dir, &args, &conn)
+    match_dir_against_db(&args.match_dir, &args, &filters, &conn)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TempDb(PathBuf);
+
+    impl Drop for TempDb {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn sample(id: u32, hash: Option<&str>, text: &str) -> SampleInfo {
+        SampleInfo {
+            sample_id: id,
+            sha256_hash: hash.map(str::to_owned),
+            text: text.to_owned(),
+            length_bytes: 10 + id as usize,
+            length: 5 + id as usize,
+        }
+    }
+
+    fn build_test_db(db_path: &Path, tracks: Vec<TrackInfo>) {
+        let (tx, rx) = mpsc::channel();
+        for (song_id, track) in tracks.into_iter().enumerate() {
+            tx.send(DbCommand::Insert { song_id, track }).unwrap();
+        }
+        tx.send(DbCommand::Quit).unwrap();
+        run_build_db_thread(db_path.to_str().unwrap().to_owned(), rx).unwrap();
+    }
+
+    #[test]
+    fn build_db_stores_raw_values() {
+        let guard = TempDb(std::env::temp_dir().join(format!(
+            "modland_hash_test_{}_raw_values.db",
+            std::process::id()
+        )));
+        let _ = std::fs::remove_file(&guard.0);
+
+        let with_pattern = TrackInfo {
+            pattern_hash: 0x8000_0000_0000_0007,
+            sha256_hash: "aa".to_owned(),
+            filename: "/pub/mods/it's a song.mod".to_owned(),
+            samples: vec![sample(0, Some("bb"), "it's here"), sample(1, None, "")],
+        };
+        let no_pattern = TrackInfo {
+            sha256_hash: "cc".to_owned(),
+            filename: "/pub/mods/b.mod".to_owned(),
+            ..Default::default()
+        };
+
+        build_test_db(&guard.0, vec![with_pattern, no_pattern]);
+
+        let conn = Connection::open(&guard.0).unwrap();
+
+        let files: Vec<(i64, String, Option<i64>, String)> = conn
+            .prepare("SELECT song_id, hash_id, pattern_hash, url FROM files ORDER BY song_id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            files,
+            vec![
+                (
+                    0,
+                    "aa".to_owned(),
+                    Some(7),
+                    "/pub/mods/it%27s%20a%20song.mod".to_owned()
+                ),
+                (1, "cc".to_owned(), None, "/pub/mods/b.mod".to_owned()),
+            ]
+        );
+
+        let samples: Vec<(Option<String>, i64, i64, String, i64, i64)> = conn
+            .prepare(
+                "SELECT hash_id, song_id, song_sample_id, text, length_bytes, length
+                 FROM samples ORDER BY song_sample_id",
+            )
+            .unwrap()
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            samples,
+            vec![
+                (Some("bb".to_owned()), 0, 0, "it's here".to_owned(), 10, 5),
+                (None, 0, 1, String::new(), 11, 6),
+            ]
+        );
+    }
+
+    struct TempFile(PathBuf);
+
+    impl TempFile {
+        fn create(name: &str, bytes: &[u8]) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "modland_hash_test_{}_{}",
+                std::process::id(),
+                name
+            ));
+            std::fs::write(&path, bytes).unwrap();
+            Self(path)
+        }
+
+        fn track_info(&self) -> TrackInfo {
+            get_track_info(self.0.to_str().unwrap(), false).unwrap()
+        }
+    }
+
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn minimal_mod() -> Vec<u8> {
+        let mut bytes = vec![0u8; 20];
+        for i in 0..31 {
+            let mut header = [0u8; 30];
+            header[22..24].copy_from_slice(&(if i == 0 { 4u16 } else { 0 }).to_be_bytes());
+            header[25] = 64;
+            header[28..30].copy_from_slice(&1u16.to_be_bytes());
+            bytes.extend_from_slice(&header);
+        }
+        bytes.push(1);
+        bytes.push(127);
+        bytes.extend_from_slice(&[0u8; 128]);
+        bytes.extend_from_slice(b"M.K.");
+        let mut pattern = vec![0u8; 1024];
+        pattern[..4].copy_from_slice(&[0x01, 0xAC, 0x10, 0x00]);
+        bytes.extend_from_slice(&pattern);
+        bytes.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        bytes
+    }
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn create(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "{}_test_{}_{}",
+                DB_FILENAME.trim_end_matches(".db"),
+                std::process::id(),
+                name
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn path(&self, name: &str) -> PathBuf {
+            self.0.join(name)
+        }
+
+        fn write(&self, rel: &str, bytes: &[u8]) {
+            let path = self.0.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+
+        fn scan(&self, recurse: bool) -> Vec<String> {
+            let root = self.0.to_str().unwrap();
+            let mut files: Vec<String> = get_files(root, recurse)
+                .into_iter()
+                .map(|f| {
+                    Path::new(&f)
+                        .strip_prefix(root)
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .replace('\\', "/")
+                })
+                .collect();
+            files.sort();
+            files
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn get_files_scans_dirs_with_modland_hash_in_path() {
+        let dir = TempDir::create("in_path");
+        assert!(dir.0.to_str().unwrap().contains("modland_hash"));
+        dir.write("a.mod", b"a");
+        assert_eq!(dir.scan(false), vec!["a.mod"]);
+    }
+
+    #[test]
+    fn get_files_skips_database_and_listing_files() {
+        let dir = TempDir::create("skips");
+        dir.write("a.mod", b"a");
+        dir.write(DB_FILENAME, b"x");
+        dir.write(&format!("{}.7z", DB_FILENAME), b"x");
+        dir.write("x.listing", b"x");
+        assert_eq!(dir.scan(false), vec!["a.mod"]);
+    }
+
+    #[test]
+    fn get_files_skips_the_tools_own_files() {
+        let dir = TempDir::create("own_files");
+        dir.write("a.mod", b"a");
+        for name in [
+            "modland_hash",
+            "modland_hash.exe",
+            "modland_hash.db.7z.part",
+            "modland_hash.db.part",
+            "modland_hash.db-journal",
+            "my_modland_hash.mod",
+        ] {
+            dir.write(name, b"x");
+        }
+        assert_eq!(dir.scan(false), vec!["a.mod"]);
+    }
+
+    #[test]
+    fn get_files_respects_recursion() {
+        let dir = TempDir::create("depth");
+        dir.write("a.mod", b"a");
+        dir.write("sub/b.mod", b"b");
+        assert_eq!(dir.scan(false), vec!["a.mod"]);
+        assert_eq!(dir.scan(true), vec!["a.mod", "sub/b.mod"]);
+    }
+
+    #[test]
+    fn get_files_of_missing_path_is_empty() {
+        let dir = TempDir::create("missing");
+        let missing = dir.0.join("nope");
+        assert!(get_files(missing.to_str().unwrap(), true).is_empty());
+    }
+
+    #[test]
+    fn stored_name_strips_root_prefix() {
+        assert_eq!(
+            get_stored_name("/data/modland", "/data/modland/pub/modules/a b.mod"),
+            "/pub/modules/a b.mod"
+        );
+        assert_eq!(
+            get_stored_name("/data/modland/", "/data/modland/pub/a.mod"),
+            "/pub/a.mod"
+        );
+        assert_eq!(get_stored_name("dir/", "dir/pub/a.mod"), "/pub/a.mod");
+        assert_eq!(get_stored_name(".", "./pub/a.mod"), "/pub/a.mod");
+    }
+
+    #[test]
+    fn stored_name_preserves_later_root_occurrences() {
+        assert_eq!(get_stored_name("pub", "pub/x/pub/y.mod"), "/x/pub/y.mod");
+        assert_eq!(get_stored_name(".", "./a.b/c.mod"), "/a.b/c.mod");
+    }
+
+    #[test]
+    fn stored_name_of_single_file_root_is_file_name() {
+        assert_eq!(get_stored_name("dir/a.mod", "dir/a.mod"), "/a.mod");
+    }
+
+    #[test]
+    fn stored_name_outside_root_keeps_full_path() {
+        assert_eq!(get_stored_name("other", "dir/a.mod"), "/dir/a.mod");
+    }
+
+    #[test]
+    fn stored_url_is_percent_encoded() {
+        assert_eq!(
+            get_stored_url(&get_stored_name("/d", "/d/pub/a b's.mod")),
+            "/pub/a%20b%27s.mod"
+        );
+    }
+
+    #[test]
+    fn track_info_of_missing_file_is_err() {
+        let dir = TempDir::create("missing_track");
+        let missing = dir.0.join("nope.mod");
+        assert!(get_track_info(missing.to_str().unwrap(), false).is_err());
+    }
+
+    #[test]
+    fn track_info_of_non_module_is_empty() {
+        let file = TempFile::create("not_a_module.bin", &[0x55; 64]);
+        let info = file.track_info();
+        assert_eq!(info.pattern_hash, 0);
+        assert!(info.samples.is_empty());
+    }
+
+    fn filters_from(extra: &[&str]) -> Result<Filters> {
+        let args = Args::parse_from(["modland_hash"].iter().chain(extra));
+        Filters::new(&args)
+    }
+
+    fn meta(filename: &str, samples: &[&str]) -> DatabaseMeta {
+        DatabaseMeta {
+            filename: filename.to_owned(),
+            samples: samples.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn filtered_names(filters: &Filters, input: &[DatabaseMeta]) -> Vec<String> {
+        filters
+            .apply_filter(input, 1)
+            .into_iter()
+            .map(|m| m.filename)
+            .collect()
+    }
+
+    #[test]
+    fn sample_regex_keeps_escape_classes_and_ignores_case() {
+        let filters = filters_from(&["--include-sample-name", r"ahh\Sox"]).unwrap();
+        let input = [meta("/a.mod", &["st-91:AHHVOX"])];
+        assert_eq!(filtered_names(&filters, &input), vec!["/a.mod"]);
+
+        let filters = filters_from(&["--include-sample-name", r"ahh\sox"]).unwrap();
+        assert!(filtered_names(&filters, &input).is_empty());
+    }
+
+    #[test]
+    fn filename_regex_keeps_escape_classes_and_ignores_case() {
+        let filters = filters_from(&["--search-filename", r"^/pub/\w+/Foo"]).unwrap();
+        let input = [meta("/pub/mods/FOO.mod", &[])];
+        assert_eq!(filtered_names(&filters, &input), vec!["/pub/mods/FOO.mod"]);
+    }
+
+    #[test]
+    fn invalid_regex_is_an_error_naming_the_pattern() {
+        let err = filters_from(&["--include-sample-name", "(unclosed"])
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("(unclosed"));
+        assert!(filters_from(&["--search-filename", "[bad"]).is_err());
+    }
+
+    #[test]
+    fn path_filters_match_percent_encoded_urls() {
+        let input = [
+            meta("/pub/modules/Protracker/Richard%20Joseph/x.mod", &[]),
+            meta("/pub/modules/Protracker/Other/y.mod", &[]),
+        ];
+
+        let include =
+            filters_from(&["--include-paths", "/pub/modules/Protracker/Richard Joseph"]).unwrap();
+        assert_eq!(
+            filtered_names(&include, &input),
+            vec!["/pub/modules/Protracker/Richard%20Joseph/x.mod"]
+        );
+
+        let exclude =
+            filters_from(&["--exclude-paths", "/pub/modules/Protracker/Richard Joseph"]).unwrap();
+        assert_eq!(
+            filtered_names(&exclude, &input),
+            vec!["/pub/modules/Protracker/Other/y.mod"]
+        );
+    }
+
+    #[test]
+    fn filter_lists_are_trimmed_and_drop_empty_items() {
+        let filters = filters_from(&["--include-file-extensions", "mod, xm,,"]).unwrap();
+        assert_eq!(filters.include_file_extensions, vec![".mod", ".xm"]);
+
+        let filters = filters_from(&["--include-paths", " /a , ,/b"]).unwrap();
+        assert_eq!(filters.include_paths, vec!["/a", "/b"]);
+    }
+
+    #[test]
+    fn track_info_of_minimal_mod_has_samples_and_hash() {
+        let file = TempFile::create("minimal.mod", &minimal_mod());
+        let info = file.track_info();
+        assert_ne!(info.pattern_hash, 0);
+        assert_eq!(info.samples.len(), 31);
+    }
+
+    #[test]
+    fn match_kind_labels() {
+        let label = |hash, pattern_hash| MatchKind { hash, pattern_hash }.label();
+        assert_eq!(label(true, true), "(hash) (pattern_hash)");
+        assert_eq!(label(true, false), "(hash)");
+        assert_eq!(label(false, true), "(pattern_hash)");
+    }
+
+    struct FailingReader {
+        sent: bool,
+    }
+
+    impl Read for FailingReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.sent {
+                return Err(std::io::Error::other("connection reset"));
+            }
+            self.sent = true;
+            buf[..4].copy_from_slice(b"data");
+            Ok(4)
+        }
+    }
+
+    #[test]
+    fn write_atomically_publishes_on_success_and_replaces_stale_part() {
+        let dir = TempDir::create("write_ok");
+        let target = dir.path("out.7z");
+        std::fs::write(part_path(&target), b"stale partial").unwrap();
+
+        write_atomically(&target, &b"payload"[..], |_| {}).unwrap();
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"payload");
+        assert!(!part_path(&target).exists());
+    }
+
+    #[test]
+    fn write_atomically_leaves_no_final_file_when_reader_fails() {
+        let dir = TempDir::create("write_fail");
+        let target = dir.path("out.7z");
+
+        let result = write_atomically(&target, FailingReader { sent: false }, |_| {});
+
+        assert!(matches!(result, Err(CopyError::Source(_))));
+        assert!(!target.exists());
+        assert!(!part_path(&target).exists());
+    }
+
+    #[test]
+    fn decompress_corrupt_archive_keeps_existing_db() {
+        let dir = TempDir::create("decompress_corrupt");
+        let archive = dir.path("db.7z");
+        let db = dir.path("db");
+        std::fs::write(&db, b"existing database").unwrap();
+        std::fs::write(&archive, b"7z\xBC\xAF\x27\x1C truncated garbage").unwrap();
+
+        let err = decompress_archive(&archive, &db).unwrap_err();
+
+        assert!(format!("{err:#}").contains("--download-database"));
+        assert!(!archive.exists());
+        assert!(!part_path(&db).exists());
+        assert_eq!(std::fs::read(&db).unwrap(), b"existing database");
+    }
+
+    #[test]
+    fn decompress_valid_archive_replaces_db_and_removes_archive() {
+        let dir = TempDir::create("decompress_valid");
+        let src = dir.path("modland_hash.db");
+        let archive = dir.path("db.7z");
+        let db = dir.path("live.db");
+        std::fs::write(&src, b"new database contents").unwrap();
+        sevenz_rust::compress_to_path(&src, &archive).unwrap();
+        std::fs::write(&db, b"old").unwrap();
+
+        decompress_archive(&archive, &db).unwrap();
+
+        assert_eq!(std::fs::read(&db).unwrap(), b"new database contents");
+        assert!(!archive.exists());
+        assert!(!part_path(&db).exists());
+    }
+
+    #[test]
+    fn decompress_keeps_archive_when_database_cannot_be_written() {
+        let dir = TempDir::create("decompress_dest_fail");
+        let src = dir.path("modland_hash.db");
+        let archive = dir.path("db.7z");
+        std::fs::write(&src, b"new database contents").unwrap();
+        sevenz_rust::compress_to_path(&src, &archive).unwrap();
+
+        let err = decompress_archive(&archive, &dir.path("missing_dir/live.db")).unwrap_err();
+
+        assert!(format!("{err:#}").contains("was kept"));
+        assert!(archive.exists());
+    }
+
+    // "first file" in block one, "second file" in block two.
+    fn write_two_block_archive(dir: &TempDir, archive: &Path) {
+        // One block per pushed entry.
+        let mut writer = sevenz_rust::SevenZWriter::create(archive).unwrap();
+        for (name, content) in [("a.db", "first file"), ("b.txt", "second file")] {
+            dir.write(name, content.as_bytes());
+            let entry = sevenz_rust::SevenZArchiveEntry::from_path(dir.path(name), name.to_owned());
+            writer
+                .push_archive_entry(entry, Some(content.as_bytes()))
+                .unwrap();
+        }
+        writer.finish().unwrap();
+        let blocks = sevenz_rust::SevenZReader::open(archive, "pass".into())
+            .unwrap()
+            .archive()
+            .folders
+            .len();
+        assert_eq!(blocks, 2);
+    }
+
+    #[test]
+    fn decompress_multi_file_archive_uses_first_file_only() {
+        let dir = TempDir::create("decompress_multi");
+        let archive = dir.path("db.7z");
+        write_two_block_archive(&dir, &archive);
+
+        let db = dir.path("live.db");
+        decompress_archive(&archive, &db).unwrap();
+
+        assert_eq!(std::fs::read(&db).unwrap(), b"first file");
+    }
+
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for &b in bytes {
+            crc ^= b as u32;
+            for _ in 0..8 {
+                crc = (crc >> 1) ^ (0xEDB8_8320 & (crc & 1).wrapping_neg());
+            }
+        }
+        !crc
+    }
+
+    // Hand-built archive (raw header, one single-file block per entry, no CRCs) so a block can
+    // declare a coder the reader rejects or an unpacked size the packed data cannot deliver.
+    // Each block is (coder id, packed bytes, declared unpacked size); all numbers stay below 0x80.
+    fn write_raw_archive(archive: &Path, blocks: &[(u8, &[u8], u8)]) {
+        let count = blocks.len() as u8;
+        let mut header = vec![0x01, 0x04, 0x06, 0x00, count, 0x09];
+        header.extend(blocks.iter().map(|b| b.1.len() as u8));
+        header.extend([0x00, 0x07, 0x0B, count, 0x00]);
+        for block in blocks {
+            // One simple coder: flags (id size 1), method id.
+            header.extend([0x01, 0x01, block.0]);
+        }
+        header.push(0x0C);
+        header.extend(blocks.iter().map(|b| b.2));
+        // End of unpack info, empty substreams info, end of streams info.
+        header.extend([0x00, 0x08, 0x00, 0x00, 0x05, count, 0x11]);
+        let names: Vec<u16> = (0..blocks.len())
+            .flat_map(|i| format!("f{i}\0").encode_utf16().collect::<Vec<_>>())
+            .collect();
+        header.push((1 + names.len() * 2) as u8);
+        header.push(0x00);
+        header.extend(names.iter().flat_map(|c| c.to_le_bytes()));
+        header.extend([0x00, 0x00]);
+
+        let packed: Vec<u8> = blocks.iter().flat_map(|b| b.1.iter().copied()).collect();
+        let mut start = Vec::new();
+        start.extend((packed.len() as u64).to_le_bytes());
+        start.extend((header.len() as u64).to_le_bytes());
+        start.extend(crc32(&header).to_le_bytes());
+
+        let mut bytes = vec![b'7', b'z', 0xBC, 0xAF, 0x27, 0x1C, 0x00, 0x04];
+        bytes.extend(crc32(&start).to_le_bytes());
+        bytes.extend(start);
+        bytes.extend(packed);
+        bytes.extend(header);
+        std::fs::write(archive, bytes).unwrap();
+    }
+
+    const COPY: u8 = 0x00;
+    const UNKNOWN_CODER: u8 = 0x7F;
+
+    #[test]
+    fn raw_archive_helper_builds_a_readable_archive() {
+        let dir = TempDir::create("raw_archive");
+        let archive = dir.path("db.7z");
+        let db = dir.path("live.db");
+        write_raw_archive(&archive, &[(COPY, b"first file", 10)]);
+
+        decompress_archive(&archive, &db).unwrap();
+
+        assert_eq!(std::fs::read(&db).unwrap(), b"first file");
+    }
+
+    #[test]
+    fn decompress_keeps_existing_db_when_later_block_fails_to_decode() {
+        let dir = TempDir::create("decompress_later_block");
+        let archive = dir.path("db.7z");
+        let db = dir.path("live.db");
+        write_raw_archive(
+            &archive,
+            &[
+                (COPY, b"first file", 10),
+                (UNKNOWN_CODER, b"second file", 11),
+            ],
+        );
+        std::fs::write(&db, b"existing database").unwrap();
+
+        let err = decompress_archive(&archive, &db).unwrap_err();
+
+        assert!(format!("{err:#}").contains("--download-database"));
+        assert!(!archive.exists());
+        assert!(!part_path(&db).exists());
+        assert_eq!(std::fs::read(&db).unwrap(), b"existing database");
+    }
+
+    #[test]
+    fn decompress_keeps_existing_db_when_stream_is_shorter_than_declared() {
+        let dir = TempDir::create("decompress_short_stream");
+        let archive = dir.path("db.7z");
+        let db = dir.path("live.db");
+        // Declares 20 bytes but packs 10; the reader reports a clean end of stream.
+        write_raw_archive(&archive, &[(COPY, b"first file", 20)]);
+        std::fs::write(&db, b"existing database").unwrap();
+
+        let err = decompress_archive(&archive, &db).unwrap_err();
+
+        assert!(format!("{err:#}").contains("expected 20 bytes"));
+        assert!(!archive.exists());
+        assert!(!part_path(&db).exists());
+        assert_eq!(std::fs::read(&db).unwrap(), b"existing database");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn decompress_reports_an_archive_it_cannot_remove() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::create("decompress_keep_archive");
+        dir.write("ro/db.7z", b"");
+        let locked = dir.path("ro");
+        let archive = locked.join("db.7z");
+        let db = dir.path("live.db");
+        write_raw_archive(&archive, &[(COPY, b"first file", 10)]);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        // root ignores directory permissions
+        let enforced = File::create(locked.join("probe")).is_err();
+
+        let result = decompress_archive(&archive, &db);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(std::fs::read(&db).unwrap(), b"first file");
+        if enforced {
+            let err = result.unwrap_err();
+            assert!(format!("{err:#}").contains("Failed to remove"));
+            assert!(archive.exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replacing_a_file_keeps_its_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::create("keep_permissions");
+        let target = dir.path("live.db");
+        std::fs::write(&target, b"old").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
+
+        write_atomically(&target, &b"new"[..], |_| {}).unwrap();
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o640);
+    }
 }

@@ -19,7 +19,7 @@ Commandline options are as following:
       --find-samples-with-length-bytes <FIND_SAMPLES_WITH_LENGTH_BYTES>
           Search the database for samples matching a certain length (length is in bytes)
       --exclude-file-extensions <EXCLUDE_FILE_EXTENSIONS>
-          Skips files with these extensions if any duplicates are found. Example: --skip-file-extensions "mdx,pdx" will skip all duplicates that contain .mdx and .pdx files (case-insensitive) [default: ]
+          Skips files with these extensions if any duplicates are found. Example: --exclude-file-extensions "mdx,pdx" will skip all duplicates that contain .mdx and .pdx files (case-insensitive) [default: ]
       --exclude-paths <EXCLUDE_PATHS>
           Skips duplicates that match these paths. Example: --exclude-paths "/pub/favourites" will exclude results where "/pub/favourites" is present [default: ]
   -i, --include-file-extensions <INCLUDE_FILE_EXTENSIONS>
@@ -42,8 +42,6 @@ Commandline options are as following:
           Print help
   -V, --version
           Print version
-  -b, --build-database <BUILD_DATABASE>
-            Builds a new database given a local directory
 ```
 
 ## Downloading
