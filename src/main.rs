@@ -1,8 +1,8 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressState, ProgressStyle};
 use rayon::prelude::*;
-use regex::Regex;
+use regex::{Regex, RegexBuilder};
 use rusqlite::{params, types::ValueRef, Connection};
 use sha2::Digest;
 use simple_logger::SimpleLogger;
@@ -244,46 +244,50 @@ struct Filters {
 
 impl Filters {
     fn init_filter(filter: &str, prefix: &str) -> Vec<String> {
-        if filter.is_empty() {
-            return Vec::new();
-        }
-
-        let mut output = Vec::new();
-
-        for t in filter.split(',') {
-            output.push(format!("{}{}", prefix, t));
-        }
-
-        output
+        filter
+            .split(',')
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(|t| format!("{}{}", prefix, t))
+            .collect()
     }
 
-    fn new(args: &Args) -> Filters {
-        let sample_search = if !args.include_sample_name.is_empty() {
-            Some(Regex::new(&args.include_sample_name.to_ascii_lowercase()).unwrap())
-        } else {
-            None
-        };
+    // Stored URLs are percent-encoded, so path filters must be too.
+    fn init_path_filter(filter: &str) -> Vec<String> {
+        Self::init_filter(&filter.to_ascii_lowercase(), "")
+            .iter()
+            .map(|p| get_stored_url(p))
+            .collect()
+    }
 
-        let search_filename = if !args.search_filename.is_empty() {
-            Some(Regex::new(&args.search_filename.to_ascii_lowercase()).unwrap())
-        } else {
-            None
-        };
+    fn init_regex(pattern: &str) -> Result<Option<Regex>> {
+        if pattern.is_empty() {
+            return Ok(None);
+        }
 
-        Filters {
-            include_paths: Self::init_filter(&args.include_paths.to_ascii_lowercase(), ""),
+        let re = RegexBuilder::new(pattern)
+            .case_insensitive(true)
+            .build()
+            .with_context(|| format!("Invalid regex \"{}\"", pattern))?;
+
+        Ok(Some(re))
+    }
+
+    fn new(args: &Args) -> Result<Filters> {
+        Ok(Filters {
+            include_paths: Self::init_path_filter(&args.include_paths),
             include_file_extensions: Self::init_filter(
                 &args.include_file_extensions.to_ascii_lowercase(),
                 ".",
             ),
-            exclude_paths: Self::init_filter(&args.exclude_paths.to_ascii_lowercase(), ""),
+            exclude_paths: Self::init_path_filter(&args.exclude_paths),
             exclude_file_extensions: Self::init_filter(
                 &args.exclude_file_extensions.to_ascii_lowercase(),
                 ".",
             ),
-            sample_search,
-            search_filename,
-        }
+            sample_search: Self::init_regex(&args.include_sample_name)?,
+            search_filename: Self::init_regex(&args.search_filename)?,
+        })
     }
 
     fn starts_with(filename: &str, tests: &[String], default_val: bool) -> bool {
@@ -322,7 +326,7 @@ impl Filters {
             let mut found_filename = false;
 
             for file in &output {
-                if re.is_match(&file.filename.to_ascii_lowercase()) {
+                if re.is_match(&file.filename) {
                     found_filename = true;
                     break;
                 }
@@ -336,7 +340,7 @@ impl Filters {
         if let Some(re) = self.sample_search.as_ref() {
             for file in &output {
                 for sample in &file.samples {
-                    if re.is_match(&sample.to_ascii_lowercase()) {
+                    if re.is_match(sample) {
                         if output.len() >= skip_level {
                             return output;
                         } else {
@@ -875,7 +879,7 @@ fn print_samples_with_outline(samples: &[String], match_reg: &Option<Regex>) {
         }
 
         if let Some(re) = match_reg.as_ref() {
-            if re.is_match(&line.to_ascii_lowercase()) {
+            if re.is_match(line) {
                 println!("│ << regex ({}) match!", re.as_str());
             } else {
                 println!("│");
@@ -935,9 +939,8 @@ fn print_found_entries(
     }
 }
 
-fn match_dir_against_db(dir: &str, args: &Args, db: &Connection) -> Result<()> {
+fn match_dir_against_db(dir: &str, args: &Args, filters: &Filters, db: &Connection) -> Result<()> {
     let files = get_files(dir, args.recursive);
-    let filters = Filters::new(args);
 
     //files.par_iter().for_each(|filename| {
     for filename in files {
@@ -1117,12 +1120,12 @@ fn check_for_db_file() -> Option<PathBuf> {
 fn get_dupes(
     db: &Connection,
     args: &Args,
+    filters: &Filters,
     get_songs_query: &str,
     get_by_id: &str,
     dupe_limit: usize,
 ) -> Result<Vec<Vec<DatabaseMeta>>> {
     let mut hash_dupes = Vec::with_capacity(700_0000);
-    let filters = Filters::new(args);
 
     let mut stmnt = db.prepare(get_songs_query)?;
     let mut rows = stmnt.query([])?;
@@ -1199,12 +1202,11 @@ fn get_dupes(
     Ok(hash_dupes)
 }
 
-fn print_db_duplicates(db: &Connection, args: &Args) -> Result<()> {
-    let filters = Filters::new(args);
-
+fn print_db_duplicates(db: &Connection, args: &Args, filters: &Filters) -> Result<()> {
     let hash_dupes = get_dupes(
         db,
         args,
+        filters,
         "SELECT hash_id FROM files",
         "SELECT song_id, url FROM files where hash_id = ?",
         1,
@@ -1213,6 +1215,7 @@ fn print_db_duplicates(db: &Connection, args: &Args) -> Result<()> {
     let pattern_dupes = get_dupes(
         db,
         args,
+        filters,
         "SELECT pattern_hash FROM files",
         "SELECT song_id, url FROM files where pattern_hash = ?",
         1,
@@ -1247,12 +1250,11 @@ fn print_db_duplicates(db: &Connection, args: &Args) -> Result<()> {
     Ok(())
 }
 
-fn print_db(db: &Connection, args: &Args) -> Result<()> {
-    let filters = Filters::new(args);
-
+fn print_db(db: &Connection, args: &Args, filters: &Filters) -> Result<()> {
     let entries = get_dupes(
         db,
         args,
+        filters,
         "SELECT hash_id FROM files",
         "SELECT song_id, url FROM files where hash_id = ?",
         0,
@@ -1271,23 +1273,17 @@ fn print_db(db: &Connection, args: &Args) -> Result<()> {
     Ok(())
 }
 
-fn print_sample_rows(rows: &mut rusqlite::Rows, args: &Args) -> Result<()> {
+fn print_sample_rows(rows: &mut rusqlite::Rows, filters: &Filters) -> Result<()> {
     let mut data = Vec::with_capacity(1024);
     let mut max_len = 0;
-
-    let sample_search = if !args.include_sample_name.is_empty() {
-        Some(Regex::new(&args.include_sample_name.to_ascii_lowercase()).unwrap())
-    } else {
-        None
-    };
 
     while let Some(row) = rows.next()? {
         let sample_id: i64 = row.get(0)?;
         let text: String = row.get(1)?;
         let url: String = row.get(2)?;
 
-        if let Some(re) = sample_search.as_ref() {
-            if !re.is_match(&text.to_ascii_lowercase()) {
+        if let Some(re) = filters.sample_search.as_ref() {
+            if !re.is_match(&text) {
                 continue;
             }
         }
@@ -1325,24 +1321,28 @@ fn print_sample_rows(rows: &mut rusqlite::Rows, args: &Args) -> Result<()> {
     Ok(())
 }
 
-fn match_db_with_sample_length(db: &Connection, args: &Args, length: usize) -> Result<()> {
+fn match_db_with_sample_length(db: &Connection, filters: &Filters, length: usize) -> Result<()> {
     let mut stmnt = db.prepare(
         "SELECT song_sample_id, text, files.url
         FROM samples JOIN files ON samples.song_id = files.song_id WHERE samples.length = ?1",
     )?;
     let mut rows = stmnt.query([length])?;
 
-    print_sample_rows(&mut rows, args)
+    print_sample_rows(&mut rows, filters)
 }
 
-fn match_db_with_sample_length_bytes(db: &Connection, args: &Args, length: usize) -> Result<()> {
+fn match_db_with_sample_length_bytes(
+    db: &Connection,
+    filters: &Filters,
+    length: usize,
+) -> Result<()> {
     let mut stmnt = db.prepare(
         "SELECT song_sample_id, text, files.url
         FROM samples JOIN files ON samples.song_id = files.song_id WHERE samples.length_bytes = ?1",
     )?;
     let mut rows = stmnt.query([length])?;
 
-    print_sample_rows(&mut rows, args)
+    print_sample_rows(&mut rows, filters)
 }
 
 fn main() -> Result<()> {
@@ -1366,6 +1366,8 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    let filters = Filters::new(&args)?;
+
     let database_path = check_for_db_file();
 
     if args.download_database || database_path.is_none() {
@@ -1378,16 +1380,16 @@ fn main() -> Result<()> {
     let conn = Connection::open(get_db_filename())?;
 
     if let Some(len) = args.find_samples_with_length {
-        return match_db_with_sample_length(&conn, &args, len);
+        return match_db_with_sample_length(&conn, &filters, len);
     }
 
     if let Some(len) = args.find_samples_with_length_bytes {
-        return match_db_with_sample_length_bytes(&conn, &args, len);
+        return match_db_with_sample_length_bytes(&conn, &filters, len);
     }
 
     // Process duplicates in the database
     if args.list_duplicates_in_database {
-        return print_db_duplicates(&conn, &args);
+        return print_db_duplicates(&conn, &args, &filters);
     }
 
     if args.match_samples {
@@ -1396,10 +1398,10 @@ fn main() -> Result<()> {
 
     // Process duplicates in the database
     if args.list_database {
-        return print_db(&conn, &args);
+        return print_db(&conn, &args, &filters);
     }
 
-    match_dir_against_db(&args.match_dir, &args, &conn)
+    match_dir_against_db(&args.match_dir, &args, &filters, &conn)
 }
 
 #[cfg(test)]
@@ -1642,6 +1644,83 @@ mod tests {
         assert_eq!(info.pattern_hash, 0);
         assert!(info.samples.is_empty());
         assert!(info.instrument_names.is_empty());
+    }
+
+    fn filters_from(extra: &[&str]) -> Result<Filters> {
+        let args = Args::parse_from(["modland_hash"].iter().chain(extra));
+        Filters::new(&args)
+    }
+
+    fn meta(filename: &str, samples: &[&str]) -> DatabaseMeta {
+        DatabaseMeta {
+            filename: filename.to_owned(),
+            samples: samples.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn filtered_names(filters: &Filters, input: &[DatabaseMeta]) -> Vec<String> {
+        filters
+            .apply_filter(input, 1)
+            .into_iter()
+            .map(|m| m.filename)
+            .collect()
+    }
+
+    #[test]
+    fn sample_regex_keeps_escape_classes_and_ignores_case() {
+        let filters = filters_from(&["--include-sample-name", r"ahh\Sox"]).unwrap();
+        let input = [meta("/a.mod", &["st-91:AHHVOX"])];
+        assert_eq!(filtered_names(&filters, &input), vec!["/a.mod"]);
+
+        let filters = filters_from(&["--include-sample-name", r"ahh\sox"]).unwrap();
+        assert!(filtered_names(&filters, &input).is_empty());
+    }
+
+    #[test]
+    fn filename_regex_keeps_escape_classes_and_ignores_case() {
+        let filters = filters_from(&["--search-filename", r"^/pub/\w+/Foo"]).unwrap();
+        let input = [meta("/pub/mods/FOO.mod", &[])];
+        assert_eq!(filtered_names(&filters, &input), vec!["/pub/mods/FOO.mod"]);
+    }
+
+    #[test]
+    fn invalid_regex_is_an_error_naming_the_pattern() {
+        let err = filters_from(&["--include-sample-name", "(unclosed"])
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("(unclosed"));
+        assert!(filters_from(&["--search-filename", "[bad"]).is_err());
+    }
+
+    #[test]
+    fn path_filters_match_percent_encoded_urls() {
+        let input = [
+            meta("/pub/modules/Protracker/Richard%20Joseph/x.mod", &[]),
+            meta("/pub/modules/Protracker/Other/y.mod", &[]),
+        ];
+
+        let include =
+            filters_from(&["--include-paths", "/pub/modules/Protracker/Richard Joseph"]).unwrap();
+        assert_eq!(
+            filtered_names(&include, &input),
+            vec!["/pub/modules/Protracker/Richard%20Joseph/x.mod"]
+        );
+
+        let exclude =
+            filters_from(&["--exclude-paths", "/pub/modules/Protracker/Richard Joseph"]).unwrap();
+        assert_eq!(
+            filtered_names(&exclude, &input),
+            vec!["/pub/modules/Protracker/Other/y.mod"]
+        );
+    }
+
+    #[test]
+    fn filter_lists_are_trimmed_and_drop_empty_items() {
+        let filters = filters_from(&["--include-file-extensions", "mod, xm,,"]).unwrap();
+        assert_eq!(filters.include_file_extensions, vec![".mod", ".xm"]);
+
+        let filters = filters_from(&["--include-paths", " /a , ,/b"]).unwrap();
+        assert_eq!(filters.include_paths, vec!["/a", "/b"]);
     }
 
     #[test]
