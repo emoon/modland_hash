@@ -658,13 +658,14 @@ impl std::fmt::Display for CopyError {
 impl std::error::Error for CopyError {}
 
 // `final_path` only ever appears fully written: data goes to `<final_path>.part` first.
-fn write_atomically(
+// Writes and syncs the `.part` file and returns the bytes written; a failure removes it.
+fn write_part(
     final_path: &Path,
     mut reader: impl Read,
     mut on_progress: impl FnMut(u64),
-) -> Result<(), CopyError> {
+) -> Result<u64, CopyError> {
     let part = part_path(final_path);
-    let mut copy = || -> Result<(), CopyError> {
+    let mut copy = || -> Result<u64, CopyError> {
         let mut file = File::create(&part).map_err(CopyError::Dest)?;
         let mut buf = vec![0u8; 64 * 1024];
         let mut written = 0u64;
@@ -679,8 +680,7 @@ fn write_atomically(
         }
         // The rename must not become durable before the data.
         file.sync_all().map_err(CopyError::Dest)?;
-        drop(file);
-        std::fs::rename(&part, final_path).map_err(CopyError::Dest)
+        Ok(written)
     };
 
     let result = copy();
@@ -688,6 +688,32 @@ fn write_atomically(
         let _ = std::fs::remove_file(&part);
     }
     result
+}
+
+// Renames `<final_path>.part` over `final_path`; a failure removes the `.part` file.
+fn publish_part(final_path: &Path) -> Result<(), CopyError> {
+    let part = part_path(final_path);
+    let publish = || -> std::io::Result<()> {
+        // Replacing a file must not reset its mode to the umask default.
+        if let Ok(existing) = std::fs::metadata(final_path) {
+            std::fs::set_permissions(&part, existing.permissions())?;
+        }
+        std::fs::rename(&part, final_path)
+    };
+    let result = publish().map_err(CopyError::Dest);
+    if result.is_err() {
+        let _ = std::fs::remove_file(&part);
+    }
+    result
+}
+
+fn write_atomically(
+    final_path: &Path,
+    reader: impl Read,
+    on_progress: impl FnMut(u64),
+) -> Result<(), CopyError> {
+    write_part(final_path, reader, on_progress)?;
+    publish_part(final_path)
 }
 
 fn create_progress_bar(len: Option<u64>) -> ProgressBar {
@@ -735,7 +761,7 @@ fn download_db() -> Result<()> {
         },
     )?;
 
-    pb.finish();
+    pb.finish_and_clear();
     Ok(())
 }
 
@@ -754,21 +780,43 @@ fn extract_database(archive: &Path, db_path: &Path) -> Result<()> {
     pb.set_prefix("Decompressing Database");
 
     let mut outcome = None;
-    sz.for_each_entries(|entry, reader| {
+    let iterated = sz.for_each_entries(|entry, reader| {
         // Returning false only ends the current block, so later blocks still call back.
         if outcome.is_some() || !entry.has_stream() {
             return Ok(true);
         }
-        outcome = Some(write_atomically(db_path, reader, |pos| {
-            pb.set_position(pos)
-        }));
+        let written = write_part(db_path, reader, |pos| pb.set_position(pos));
+        outcome = Some((entry.size(), written));
         Ok(false)
-    })?;
+    });
+
+    // Later blocks are only decoded after the callback returned, so they can still fail.
+    if let Err(e) = iterated {
+        let _ = std::fs::remove_file(part_path(db_path));
+        return Err(e.into());
+    }
 
     match outcome {
-        Some(result) => Ok(result?),
+        Some((expected, written)) => {
+            if let Err(e) = check_complete(written?, expected) {
+                let _ = std::fs::remove_file(part_path(db_path));
+                return Err(e.into());
+            }
+            Ok(publish_part(db_path)?)
+        }
         None => bail!("archive contains no files"),
     }
+}
+
+// A stream that ends early reads as a clean EOF, so the length is the only way to notice.
+fn check_complete(written: u64, expected: u64) -> Result<(), CopyError> {
+    if written == expected {
+        return Ok(());
+    }
+    Err(CopyError::Source(std::io::Error::new(
+        std::io::ErrorKind::UnexpectedEof,
+        format!("expected {expected} bytes but the archive yielded {written}"),
+    )))
 }
 
 fn decompress_archive(archive: &Path, db_path: &Path) -> Result<()> {
@@ -789,7 +837,10 @@ fn decompress_archive(archive: &Path, db_path: &Path) -> Result<()> {
     }
 
     // A broken archive would fail the same way on every start.
-    let _ = std::fs::remove_file(archive);
+    let removed = std::fs::remove_file(archive);
+    if result.is_ok() {
+        return removed.with_context(|| format!("Failed to remove {}", archive.display()));
+    }
     result.with_context(|| {
         format!(
             "Failed to unpack {}; re-run with --download-database to fetch it again",
@@ -1915,13 +1966,10 @@ mod tests {
         assert!(archive.exists());
     }
 
-    #[test]
-    fn decompress_multi_file_archive_uses_first_file_only() {
-        let dir = TempDir::create("decompress_multi");
-        let archive = dir.path("db.7z");
-
+    // "first file" in block one, "second file" in block two.
+    fn write_two_block_archive(dir: &TempDir, archive: &Path) {
         // One block per pushed entry.
-        let mut writer = sevenz_rust::SevenZWriter::create(&archive).unwrap();
+        let mut writer = sevenz_rust::SevenZWriter::create(archive).unwrap();
         for (name, content) in [("a.db", "first file"), ("b.txt", "second file")] {
             dir.write(name, content.as_bytes());
             let entry = sevenz_rust::SevenZArchiveEntry::from_path(dir.path(name), name.to_owned());
@@ -1930,16 +1978,169 @@ mod tests {
                 .unwrap();
         }
         writer.finish().unwrap();
-        let blocks = sevenz_rust::SevenZReader::open(&archive, "pass".into())
+        let blocks = sevenz_rust::SevenZReader::open(archive, "pass".into())
             .unwrap()
             .archive()
             .folders
             .len();
         assert_eq!(blocks, 2);
+    }
+
+    #[test]
+    fn decompress_multi_file_archive_uses_first_file_only() {
+        let dir = TempDir::create("decompress_multi");
+        let archive = dir.path("db.7z");
+        write_two_block_archive(&dir, &archive);
 
         let db = dir.path("live.db");
         decompress_archive(&archive, &db).unwrap();
 
         assert_eq!(std::fs::read(&db).unwrap(), b"first file");
+    }
+
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for &b in bytes {
+            crc ^= b as u32;
+            for _ in 0..8 {
+                crc = (crc >> 1) ^ (0xEDB8_8320 & (crc & 1).wrapping_neg());
+            }
+        }
+        !crc
+    }
+
+    // Hand-built archive (raw header, one single-file block per entry, no CRCs) so a block can
+    // declare a coder the reader rejects or an unpacked size the packed data cannot deliver.
+    // Each block is (coder id, packed bytes, declared unpacked size); all numbers stay below 0x80.
+    fn write_raw_archive(archive: &Path, blocks: &[(u8, &[u8], u8)]) {
+        let count = blocks.len() as u8;
+        let mut header = vec![0x01, 0x04, 0x06, 0x00, count, 0x09];
+        header.extend(blocks.iter().map(|b| b.1.len() as u8));
+        header.extend([0x00, 0x07, 0x0B, count, 0x00]);
+        for block in blocks {
+            // One simple coder: flags (id size 1), method id.
+            header.extend([0x01, 0x01, block.0]);
+        }
+        header.push(0x0C);
+        header.extend(blocks.iter().map(|b| b.2));
+        // End of unpack info, empty substreams info, end of streams info.
+        header.extend([0x00, 0x08, 0x00, 0x00, 0x05, count, 0x11]);
+        let names: Vec<u16> = (0..blocks.len())
+            .flat_map(|i| format!("f{i}\0").encode_utf16().collect::<Vec<_>>())
+            .collect();
+        header.push((1 + names.len() * 2) as u8);
+        header.push(0x00);
+        header.extend(names.iter().flat_map(|c| c.to_le_bytes()));
+        header.extend([0x00, 0x00]);
+
+        let packed: Vec<u8> = blocks.iter().flat_map(|b| b.1.iter().copied()).collect();
+        let mut start = Vec::new();
+        start.extend((packed.len() as u64).to_le_bytes());
+        start.extend((header.len() as u64).to_le_bytes());
+        start.extend(crc32(&header).to_le_bytes());
+
+        let mut bytes = vec![b'7', b'z', 0xBC, 0xAF, 0x27, 0x1C, 0x00, 0x04];
+        bytes.extend(crc32(&start).to_le_bytes());
+        bytes.extend(start);
+        bytes.extend(packed);
+        bytes.extend(header);
+        std::fs::write(archive, bytes).unwrap();
+    }
+
+    const COPY: u8 = 0x00;
+    const UNKNOWN_CODER: u8 = 0x7F;
+
+    #[test]
+    fn raw_archive_helper_builds_a_readable_archive() {
+        let dir = TempDir::create("raw_archive");
+        let archive = dir.path("db.7z");
+        let db = dir.path("live.db");
+        write_raw_archive(&archive, &[(COPY, b"first file", 10)]);
+
+        decompress_archive(&archive, &db).unwrap();
+
+        assert_eq!(std::fs::read(&db).unwrap(), b"first file");
+    }
+
+    #[test]
+    fn decompress_keeps_existing_db_when_later_block_fails_to_decode() {
+        let dir = TempDir::create("decompress_later_block");
+        let archive = dir.path("db.7z");
+        let db = dir.path("live.db");
+        write_raw_archive(
+            &archive,
+            &[
+                (COPY, b"first file", 10),
+                (UNKNOWN_CODER, b"second file", 11),
+            ],
+        );
+        std::fs::write(&db, b"existing database").unwrap();
+
+        let err = decompress_archive(&archive, &db).unwrap_err();
+
+        assert!(format!("{err:#}").contains("--download-database"));
+        assert!(!archive.exists());
+        assert!(!part_path(&db).exists());
+        assert_eq!(std::fs::read(&db).unwrap(), b"existing database");
+    }
+
+    #[test]
+    fn decompress_keeps_existing_db_when_stream_is_shorter_than_declared() {
+        let dir = TempDir::create("decompress_short_stream");
+        let archive = dir.path("db.7z");
+        let db = dir.path("live.db");
+        // Declares 20 bytes but packs 10; the reader reports a clean end of stream.
+        write_raw_archive(&archive, &[(COPY, b"first file", 20)]);
+        std::fs::write(&db, b"existing database").unwrap();
+
+        let err = decompress_archive(&archive, &db).unwrap_err();
+
+        assert!(format!("{err:#}").contains("expected 20 bytes"));
+        assert!(!archive.exists());
+        assert!(!part_path(&db).exists());
+        assert_eq!(std::fs::read(&db).unwrap(), b"existing database");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn decompress_reports_an_archive_it_cannot_remove() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::create("decompress_keep_archive");
+        dir.write("ro/db.7z", b"");
+        let locked = dir.path("ro");
+        let archive = locked.join("db.7z");
+        let db = dir.path("live.db");
+        write_raw_archive(&archive, &[(COPY, b"first file", 10)]);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        // root ignores directory permissions
+        let enforced = File::create(locked.join("probe")).is_err();
+
+        let result = decompress_archive(&archive, &db);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(std::fs::read(&db).unwrap(), b"first file");
+        if enforced {
+            let err = result.unwrap_err();
+            assert!(format!("{err:#}").contains("Failed to remove"));
+            assert!(archive.exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replacing_a_file_keeps_its_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::create("keep_permissions");
+        let target = dir.path("live.db");
+        std::fs::write(&target, b"old").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
+
+        write_atomically(&target, &b"new"[..], |_| {}).unwrap();
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o640);
     }
 }
