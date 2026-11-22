@@ -901,9 +901,24 @@ fn print_samples_with_outline(samples: &[String], match_reg: &Option<Regex>) {
     println!("┘");
 }
 
+struct MatchKind {
+    hash: bool,
+    pattern_hash: bool,
+}
+
+impl MatchKind {
+    fn label(&self) -> &'static str {
+        match (self.hash, self.pattern_hash) {
+            (true, true) => "(hash) (pattern_hash)",
+            (true, false) => "(hash)",
+            _ => "(pattern_hash)",
+        }
+    }
+}
+
 fn print_found_entries(
     inital_samples: &[String],
-    entries: &HashMap<&DatabaseMeta, (bool, bool)>,
+    entries: &HashMap<&DatabaseMeta, MatchKind>,
     args: &Args,
     search_sample: &Option<Regex>,
 ) {
@@ -916,21 +931,15 @@ fn print_found_entries(
 
     vals.sort_by(|a, b| a.0.filename.cmp(&b.0.filename));
 
-    for val in &vals {
-        let url = get_url(&val.0.filename);
+    for (meta, kind) in &vals {
+        let url = get_url(&meta.filename);
+        if args.print_sample_names && !printed_initial_samples {
+            print_samples_with_outline(inital_samples, search_sample);
+            printed_initial_samples = true;
+        }
+        println!("Found match {} {}", url, kind.label());
         if args.print_sample_names {
-            if !printed_initial_samples && args.print_sample_names {
-                print_samples_with_outline(inital_samples, search_sample);
-                printed_initial_samples = true;
-            }
-            println!("Found match {} (pattern_hash)", url);
-            print_samples_with_outline(&val.0.samples, search_sample);
-        } else if val.1 .0 && val.1 .1 {
-            println!("Found match {} (hash) (pattern_hash)", url);
-        } else if val.1 .0 && !val.1 .1 {
-            println!("Found match {} (hash)", url);
-        } else {
-            println!("Found match {} (pattern_hash)", url);
+            print_samples_with_outline(&meta.samples, search_sample);
         }
     }
 
@@ -963,15 +972,23 @@ fn match_dir_against_db(dir: &str, args: &Args, filters: &Filters, db: &Connecti
         let mut found_entries = HashMap::new();
 
         for entry in &filenames {
-            found_entries.insert(entry, (true, false));
+            found_entries.insert(
+                entry,
+                MatchKind {
+                    hash: true,
+                    pattern_hash: false,
+                },
+            );
         }
 
         for entry in &filenames_pattern {
-            if let Some(v) = found_entries.get_mut(entry) {
-                v.1 = true;
-            } else {
-                found_entries.insert(entry, (false, true));
-            }
+            found_entries
+                .entry(entry)
+                .or_insert(MatchKind {
+                    hash: false,
+                    pattern_hash: true,
+                })
+                .pattern_hash = true;
         }
 
         let sample_names: Vec<String> = info.samples.iter().map(|s| s.text.to_owned()).collect();
@@ -1729,5 +1746,13 @@ mod tests {
         let info = file.track_info();
         assert_ne!(info.pattern_hash, 0);
         assert_eq!(info.samples.len(), 31);
+    }
+
+    #[test]
+    fn match_kind_labels() {
+        let label = |hash, pattern_hash| MatchKind { hash, pattern_hash }.label();
+        assert_eq!(label(true, true), "(hash) (pattern_hash)");
+        assert_eq!(label(true, false), "(hash)");
+        assert_eq!(label(false, true), "(pattern_hash)");
     }
 }
