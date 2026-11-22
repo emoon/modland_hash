@@ -1666,10 +1666,12 @@ mod tests {
             let mut files: Vec<String> = get_files(root, recurse)
                 .into_iter()
                 .map(|f| {
-                    f.strip_prefix(root)
+                    Path::new(&f)
+                        .strip_prefix(root)
                         .unwrap()
-                        .trim_start_matches('/')
-                        .to_owned()
+                        .to_str()
+                        .unwrap()
+                        .replace('\\', "/")
                 })
                 .collect();
             files.sort();
