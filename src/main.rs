@@ -103,20 +103,15 @@ extern "C" {
 
 fn get_string_cstr(c: *const c_char) -> String {
     match unsafe { std::ffi::CStr::from_ptr(c).to_str() } {
-        //Ok(s) => if s.is_empty() { String::new() } else { format!("'{}'", s.to_owned()) },
-        Ok(s) => {
-            let t = s.replace('\'', "''");
-            format!("'{}'", t)
-        }
-
-        Err(_) => "''".to_string(),
+        Ok(s) => s.to_owned(),
+        Err(_) => String::new(),
     }
 }
 
 #[derive(Clone)]
 struct SampleInfo {
     sample_id: u32,
-    sha256_hash: String,
+    sha256_hash: Option<String>,
     text: String,
     length_bytes: usize,
     length: usize,
@@ -435,12 +430,9 @@ fn get_track_info(filename: &str, dump_patterns: bool) -> TrackInfo {
         track_info.pattern_hash = hash_id;
 
         for sample in samples {
-            let sha256_hash = if let Some(data) = sample.get_data() {
-                let hash = sha2::Sha256::digest(data);
-                format!("'{:x}'", hash)
-            } else {
-                "NULL".to_string()
-            };
+            let sha256_hash = sample
+                .get_data()
+                .map(|data| format!("{:x}", sha2::Sha256::digest(data)));
 
             track_info.samples.push(SampleInfo {
                 sample_id: sample.sample_id,
@@ -476,8 +468,43 @@ fn get_db_filename() -> String {
 }
 
 enum DbCommand {
-    Insert(String), // Example command to insert a string
-    Quit,           // Example command to query a string
+    Insert { song_id: usize, track: TrackInfo },
+    Quit,
+}
+
+// The DB only stores the lower 63 bits; 0 means "no pattern hash"
+fn stored_pattern_hash(pattern_hash: u64) -> Option<i64> {
+    let masked = pattern_hash & 0x7FFF_FFFF_FFFF_FFFF;
+    (masked != 0).then_some(masked as i64)
+}
+
+fn insert_track(conn: &Connection, song_id: usize, track: &TrackInfo) -> Result<()> {
+    conn.prepare_cached(
+        "INSERT INTO files (song_id, hash_id, pattern_hash, url) VALUES (?1, ?2, ?3, ?4)",
+    )?
+    .execute(params![
+        song_id,
+        track.sha256_hash,
+        stored_pattern_hash(track.pattern_hash),
+        get_stored_url(&track.filename)
+    ])?;
+
+    let mut stmnt = conn.prepare_cached(
+        "INSERT INTO samples (hash_id, song_id, song_sample_id, text, length_bytes, length) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+    )?;
+
+    for sample in &track.samples {
+        stmnt.execute(params![
+            sample.sha256_hash,
+            song_id,
+            sample.sample_id,
+            sample.text,
+            sample.length_bytes,
+            sample.length
+        ])?;
+    }
+
+    Ok(())
 }
 
 fn run_build_db_thread(filename: String, rx: Receiver<DbCommand>) -> Result<()> {
@@ -539,9 +566,7 @@ fn run_build_db_thread(filename: String, rx: Receiver<DbCommand>) -> Result<()> 
     // Listen for commands
     for command in rx {
         match command {
-            DbCommand::Insert(cmd) => {
-                conn.execute(&cmd, [])?;
-            }
+            DbCommand::Insert { song_id, track } => insert_track(&conn, song_id, &track)?,
             DbCommand::Quit => break,
         }
     }
@@ -577,39 +602,21 @@ fn build_database(out_filename: &str, database_path: &str, args: &Args) {
 
     //pb.set_prefix("Building database");
 
-    files.par_iter().enumerate().for_each(|(index, input_path)| {
-        let mut track = get_track_info(input_path, args.dump_patterns);
-        track.filename = input_path.replace(database_path, "");
+    files
+        .par_iter()
+        .enumerate()
+        .for_each(|(index, input_path)| {
+            let mut track = get_track_info(input_path, args.dump_patterns);
+            track.filename = input_path.replace(database_path, "");
 
-        let t = track.pattern_hash & 0x7FFF_FFFF_FFFF_FFFF;
-        let pattern_hash = if t != 0 {
-            format!("{}", t)
-        } else {
-            "NULL".to_string()
-        };
+            tx.send(DbCommand::Insert {
+                song_id: index,
+                track,
+            })
+            .expect("Failed to send command");
 
-        let insert = format!("INSERT INTO files (song_id, hash_id, pattern_hash, url) VALUES ({}, '{}', {}, '{}')", 
-                index,
-                &track.sha256_hash,
-                pattern_hash,
-                get_stored_url(&track.filename));
-
-        tx.send(DbCommand::Insert(insert)).expect("Failed to send command");
-
-        for sample in &track.samples {
-            let insert = format!("INSERT INTO samples (hash_id, song_id, song_sample_id, text, length_bytes, length) VALUES ({}, {}, {}, {}, {}, {})", 
-                &sample.sha256_hash,
-                index,
-                sample.sample_id,
-                &sample.text,
-                sample.length_bytes,
-                sample.length);
-
-            tx.send(DbCommand::Insert(insert)).expect("Failed to send command");
-        }
-
-        //pb.inc(1);
-    });
+            //pb.inc(1);
+        });
 
     println!("Writing database...");
 
@@ -788,7 +795,9 @@ fn get_files_from_pattern_hash(info: &TrackInfo, db: &Connection) -> Result<Vec<
         return Ok(entries);
     }
 
-    let pattern_hash = info.pattern_hash & 0x7FFF_FFFF_FFFF_FFFF;
+    let Some(pattern_hash) = stored_pattern_hash(info.pattern_hash) else {
+        return Ok(entries);
+    };
 
     let mut stmnt = db.prepare("SELECT song_id, url FROM files WHERE pattern_hash = :hash")?;
     let mut rows = stmnt.query(&[(":hash", &pattern_hash)])?;
@@ -976,13 +985,11 @@ fn match_samples(dir: &str, db: &Connection, args: &Args) -> Result<()> {
             let mut matching_data = Vec::new();
 
             if sample.length_bytes > 0 {
-                let statement = format!("
-                    SELECT song_sample_id, text, files.url 
-                    FROM samples JOIN files ON samples.song_id = files.song_id WHERE samples.hash_id = {}",
-                    sample.sha256_hash);
-
-                let mut stmnt = db.prepare(&statement)?;
-                let mut rows = stmnt.query([])?;
+                let mut stmnt = db.prepare(
+                    "SELECT song_sample_id, text, files.url
+                    FROM samples JOIN files ON samples.song_id = files.song_id WHERE samples.hash_id = ?1",
+                )?;
+                let mut rows = stmnt.query([&sample.sha256_hash])?;
 
                 while let Some(row) = rows.next()? {
                     let sample_id: i64 = row.get(0)?;
@@ -999,11 +1006,7 @@ fn match_samples(dir: &str, db: &Connection, args: &Args) -> Result<()> {
                 }
             }
 
-            print!(
-                "{:02} {}",
-                sample.sample_id,
-                &sample.text[1..sample.text.len() - 1]
-            );
+            print!("{:02} {}", sample.sample_id, sample.text);
 
             for _ in sample.text.chars().count()..max_len - 1 {
                 print!(" ");
@@ -1216,7 +1219,7 @@ fn print_db(db: &Connection, args: &Args) -> Result<()> {
         0,
     )?;
 
-    for (_index, v) in entries.iter().enumerate() {
+    for v in entries.iter() {
         for e in v {
             println!("{}", get_url(&e.filename));
 
@@ -1284,29 +1287,21 @@ fn print_sample_rows(rows: &mut rusqlite::Rows, args: &Args) -> Result<()> {
 }
 
 fn match_db_with_sample_length(db: &Connection, args: &Args, length: usize) -> Result<()> {
-    let statement = format!(
-        "
-        SELECT song_sample_id, text, files.url 
-        FROM samples JOIN files ON samples.song_id = files.song_id WHERE samples.length = {}",
-        length
-    );
-
-    let mut stmnt = db.prepare(&statement)?;
-    let mut rows = stmnt.query([])?;
+    let mut stmnt = db.prepare(
+        "SELECT song_sample_id, text, files.url
+        FROM samples JOIN files ON samples.song_id = files.song_id WHERE samples.length = ?1",
+    )?;
+    let mut rows = stmnt.query([length])?;
 
     print_sample_rows(&mut rows, args)
 }
 
 fn match_db_with_sample_length_bytes(db: &Connection, args: &Args, length: usize) -> Result<()> {
-    let statement = format!(
-        "
-        SELECT song_sample_id, text, files.url 
-        FROM samples JOIN files ON samples.song_id = files.song_id WHERE samples.length_bytes = {}",
-        length
-    );
-
-    let mut stmnt = db.prepare(&statement)?;
-    let mut rows = stmnt.query([])?;
+    let mut stmnt = db.prepare(
+        "SELECT song_sample_id, text, files.url
+        FROM samples JOIN files ON samples.song_id = files.song_id WHERE samples.length_bytes = ?1",
+    )?;
+    let mut rows = stmnt.query([length])?;
 
     print_sample_rows(&mut rows, args)
 }
@@ -1366,4 +1361,109 @@ fn main() -> Result<()> {
     }
 
     match_dir_against_db(&args.match_dir, &args, &conn)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TempDb(PathBuf);
+
+    impl Drop for TempDb {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn sample(id: u32, hash: Option<&str>, text: &str) -> SampleInfo {
+        SampleInfo {
+            sample_id: id,
+            sha256_hash: hash.map(str::to_owned),
+            text: text.to_owned(),
+            length_bytes: 10 + id as usize,
+            length: 5 + id as usize,
+        }
+    }
+
+    fn build_test_db(db_path: &Path, tracks: Vec<TrackInfo>) {
+        let (tx, rx) = mpsc::channel();
+        for (song_id, track) in tracks.into_iter().enumerate() {
+            tx.send(DbCommand::Insert { song_id, track }).unwrap();
+        }
+        tx.send(DbCommand::Quit).unwrap();
+        run_build_db_thread(db_path.to_str().unwrap().to_owned(), rx).unwrap();
+    }
+
+    #[test]
+    fn build_db_stores_raw_values() {
+        let guard = TempDb(std::env::temp_dir().join(format!(
+            "modland_hash_test_{}_raw_values.db",
+            std::process::id()
+        )));
+        let _ = std::fs::remove_file(&guard.0);
+
+        let with_pattern = TrackInfo {
+            pattern_hash: 0x8000_0000_0000_0007,
+            sha256_hash: "aa".to_owned(),
+            filename: "/pub/mods/it's a song.mod".to_owned(),
+            samples: vec![sample(0, Some("bb"), "it's here"), sample(1, None, "")],
+            instrument_names: Vec::new(),
+        };
+        let no_pattern = TrackInfo {
+            sha256_hash: "cc".to_owned(),
+            filename: "/pub/mods/b.mod".to_owned(),
+            ..Default::default()
+        };
+
+        build_test_db(&guard.0, vec![with_pattern, no_pattern]);
+
+        let conn = Connection::open(&guard.0).unwrap();
+
+        let files: Vec<(i64, String, Option<i64>, String)> = conn
+            .prepare("SELECT song_id, hash_id, pattern_hash, url FROM files ORDER BY song_id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            files,
+            vec![
+                (
+                    0,
+                    "aa".to_owned(),
+                    Some(7),
+                    "/pub/mods/it%27s%20a%20song.mod".to_owned()
+                ),
+                (1, "cc".to_owned(), None, "/pub/mods/b.mod".to_owned()),
+            ]
+        );
+
+        let samples: Vec<(Option<String>, i64, i64, String, i64, i64)> = conn
+            .prepare(
+                "SELECT hash_id, song_id, song_sample_id, text, length_bytes, length
+                 FROM samples ORDER BY song_sample_id",
+            )
+            .unwrap()
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            samples,
+            vec![
+                (Some("bb".to_owned()), 0, 0, "it's here".to_owned(), 10, 5),
+                (None, 0, 1, String::new(), 11, 6),
+            ]
+        );
+    }
 }
