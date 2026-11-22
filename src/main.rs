@@ -433,6 +433,26 @@ fn get_stored_url(filename: &str) -> String {
     filename.replace('\'', "%27")
 }
 
+// Name stored in the database: the path below `root`, `/`-separated with a leading `/`.
+fn get_stored_name(root: &str, path: &str) -> String {
+    let path = Path::new(path);
+    let relative = match path.strip_prefix(root) {
+        // The root is the file itself.
+        Ok(rest) if rest.as_os_str().is_empty() => path.file_name().map(Path::new),
+        Ok(rest) => Some(rest),
+        Err(_) => None,
+    };
+    let relative = relative.unwrap_or(path);
+
+    relative
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(name) => Some(name.to_string_lossy()),
+            _ => None,
+        })
+        .fold(String::new(), |name, part| format!("{}/{}", name, part))
+}
+
 // Fetches info for a track/song
 fn get_track_info(filename: &str, dump_patterns: bool) -> Result<TrackInfo> {
     // Calculate sha256 of the file
@@ -638,7 +658,7 @@ fn build_database(out_filename: &str, database_path: &str, args: &Args) {
                     return;
                 }
             };
-            track.filename = input_path.replace(database_path, "");
+            track.filename = get_stored_name(database_path, input_path);
 
             tx.send(DbCommand::Insert {
                 song_id: index,
@@ -1372,6 +1392,10 @@ fn main() -> Result<()> {
     // or if the database version doesn't match
 
     if let Some(db_path) = args.build_database.as_ref() {
+        if !Path::new(db_path).exists() {
+            bail!("build path does not exist: {}", db_path);
+        }
+
         let filename = get_db_filename();
 
         if std::path::Path::new(&filename).exists() {
@@ -1645,6 +1669,44 @@ mod tests {
         let dir = TempDir::create("missing");
         let missing = dir.0.join("nope");
         assert!(get_files(missing.to_str().unwrap(), true).is_empty());
+    }
+
+    #[test]
+    fn stored_name_strips_root_prefix() {
+        assert_eq!(
+            get_stored_name("/data/modland", "/data/modland/pub/modules/a b.mod"),
+            "/pub/modules/a b.mod"
+        );
+        assert_eq!(
+            get_stored_name("/data/modland/", "/data/modland/pub/a.mod"),
+            "/pub/a.mod"
+        );
+        assert_eq!(get_stored_name("dir/", "dir/pub/a.mod"), "/pub/a.mod");
+        assert_eq!(get_stored_name(".", "./pub/a.mod"), "/pub/a.mod");
+    }
+
+    #[test]
+    fn stored_name_preserves_later_root_occurrences() {
+        assert_eq!(get_stored_name("pub", "pub/x/pub/y.mod"), "/x/pub/y.mod");
+        assert_eq!(get_stored_name(".", "./a.b/c.mod"), "/a.b/c.mod");
+    }
+
+    #[test]
+    fn stored_name_of_single_file_root_is_file_name() {
+        assert_eq!(get_stored_name("dir/a.mod", "dir/a.mod"), "/a.mod");
+    }
+
+    #[test]
+    fn stored_name_outside_root_keeps_full_path() {
+        assert_eq!(get_stored_name("other", "dir/a.mod"), "/dir/a.mod");
+    }
+
+    #[test]
+    fn stored_url_is_percent_encoded() {
+        assert_eq!(
+            get_stored_url(&get_stored_name("/d", "/d/pub/a b's.mod")),
+            "/pub/a%20b%27s.mod"
+        );
     }
 
     #[test]
