@@ -564,7 +564,6 @@ dependencies = [
  "anyhow",
  "cc",
  "clap",
- "filetime",
  "indicatif",
  "log",
  "rayon",

@@ -171,7 +171,6 @@ extern "C"
             OpenMPT::CSoundFile* sf = data->mod->get_snd_file();
             
             int samples_count = sf->GetNumSamples();
-            int instrument_count = sf->GetNumInstruments();
 
             if (samples_count > 0) {
                 // Owned by data from here on so free_hash_data releases it if we throw below.
@@ -204,20 +203,8 @@ extern "C"
                 }
             }
 
-            if (instrument_count > 0) {
-                data->instrument_names = (char**)DebugHeapAllocate(g_debug_heap, sizeof(char*) * instrument_count, alignof(char*));
-                if (data->instrument_names == nullptr) {
-                    throw std::bad_alloc();
-                }
-
-                for (int i = 0; i < instrument_count; i++) {
-                    data->instrument_names[i] = (char*)sf->GetInstrumentName(i);
-                }
-            }
-
             data->hash = hash_patterns(*data->mod, dump_patterns);
             data->sample_count = samples_count;
-            data->instrument_count = instrument_count;
             data->channel_count = data->mod->get_num_channels();
         }
         catch (const std::exception &e) {
@@ -238,9 +225,6 @@ extern "C"
 
         if (data->samples)
             DebugHeapFree(g_debug_heap, data->samples);
-
-        if (data->instrument_names)
-            DebugHeapFree(g_debug_heap, data->instrument_names);
 
         DebugHeapFree(g_debug_heap, data);
     }

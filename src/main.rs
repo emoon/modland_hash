@@ -77,9 +77,9 @@ impl CSampleData {
 struct CData {
     hash: u64,
     samples: *const CSampleData,
-    instrument_names: *const *const c_char,
+    _instrument_names: *const *const c_char,
     sample_count: c_int,
-    instrument_count: c_int,
+    _instrument_count: c_int,
     channel_count: c_int,
 }
 
@@ -92,17 +92,6 @@ impl CData {
         // SAFETY: `samples` is non-null and hash_file allocated `sample_count` initialized
         // entries, which stay valid until free_hash_data.
         unsafe { std::slice::from_raw_parts(self.samples, count) }
-    }
-
-    fn get_instrument_names(&self) -> Vec<String> {
-        let count = usize::try_from(self.instrument_count).unwrap_or(0);
-        if self.instrument_names.is_null() || count == 0 {
-            return Vec::new();
-        }
-        // SAFETY: `instrument_names` is non-null and hash_file allocated `instrument_count`
-        // initialized pointers, which stay valid until free_hash_data.
-        let names = unsafe { std::slice::from_raw_parts(self.instrument_names, count) };
-        names.iter().map(|&name| get_string_cstr(name)).collect()
     }
 }
 
@@ -137,7 +126,6 @@ struct TrackInfo {
     sha256_hash: String,
     filename: String,
     samples: Vec<SampleInfo>,
-    instrument_names: Vec<String>,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -192,7 +180,7 @@ struct Args {
     #[clap(long)]
     find_samples_with_length_bytes: Option<usize>,
 
-    /// Skips files with these extensions if any duplicates are found. Example: --skip-file-extensions "mdx,pdx" will skip all duplicates that contain .mdx and .pdx files (case-insensitive)
+    /// Skips files with these extensions if any duplicates are found. Example: --exclude-file-extensions "mdx,pdx" will skip all duplicates that contain .mdx and .pdx files (case-insensitive)
     #[clap(long, default_value = "")]
     exclude_file_extensions: String,
 
@@ -381,14 +369,6 @@ fn get_files(path: &str, recurse: bool) -> Vec<String> {
         }
     }
 
-    let _spinner_style = ProgressStyle::with_template("{prefix:.bold.dim} {spinner} {wide_msg}")
-        .unwrap()
-        .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈ ");
-
-    //let pb = ProgressBar::new(0);
-    //pb.set_style(spinner_style);
-    //pb.set_prefix(format!("Fetching list of files... [{}/?]", 0));
-
     let max_depth = if !recurse { 1 } else { usize::MAX };
 
     let files: Vec<String> = WalkDir::new(path)
@@ -406,7 +386,6 @@ fn get_files(path: &str, recurse: bool) -> Vec<String> {
 
             let filename = file.path().to_str()?;
             if file.file_type().is_file() && should_scan(&file.file_name().to_string_lossy()) {
-                //pb.set_message(filename.to_owned());
                 return Some(filename.to_owned());
             }
             None
@@ -494,8 +473,6 @@ fn get_track_info(filename: &str, dump_patterns: bool) -> Result<TrackInfo> {
             });
         }
 
-        track_info.instrument_names = song.get_instrument_names();
-
         // SAFETY: `song_data` came from hash_file, is freed exactly once, and `song` and
         // `samples` are not used afterwards.
         unsafe { free_hash_data(song_data) };
@@ -568,21 +545,6 @@ fn run_build_db_thread(filename: String, rx: Receiver<DbCommand>) -> Result<()> 
     )
     .unwrap();
 
-    /*
-        c5_speed INTEGER,
-        pan INTEGER,
-        volume INTEGER,
-        global_vol INTEGER,
-        stereo INTEGER,
-        sample_bits INTEGER,
-        relative_tone INTEGER,
-        fine_tune INTEGER,
-        vibrato_type INTEGER,
-        vibrato_sweep INTEGER,
-        vibrato_depth INTEGER,
-        vibrato_rate INTEGER,
-    */
-
     conn.execute(
         "CREATE TABLE samples (
         hash_id TEXT, 
@@ -639,14 +601,6 @@ fn build_database(out_filename: &str, database_path: &str, args: &Args) {
 
     let files = get_files(database_path, args.recursive);
 
-    let _spinner_style =
-        ProgressStyle::with_template("{prefix:.bold.dim} {wide_bar} {pos}/{len}").unwrap();
-
-    //let pb = ProgressBar::new(files.len() as _);
-    //pb.set_style(spinner_style);
-
-    //pb.set_prefix("Building database");
-
     files
         .par_iter()
         .enumerate()
@@ -665,8 +619,6 @@ fn build_database(out_filename: &str, database_path: &str, args: &Args) {
                 track,
             })
             .expect("Failed to send command");
-
-            //pb.inc(1);
         });
 
     println!("Writing database...");
@@ -722,7 +674,6 @@ fn create_progress_bar(len: Option<u64>) -> ProgressBar {
         return pb;
     };
     let pb = ProgressBar::new(len);
-    //pb.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})")
     pb.set_style(
         ProgressStyle::with_template(
             "{prefix} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})",
@@ -1000,7 +951,6 @@ fn print_found_entries(
 fn match_dir_against_db(dir: &str, args: &Args, filters: &Filters, db: &Connection) -> Result<()> {
     let files = get_files(dir, args.recursive);
 
-    //files.par_iter().for_each(|filename| {
     for filename in files {
         let info = match get_track_info(&filename, args.dump_patterns) {
             Ok(info) => info,
@@ -1173,7 +1123,7 @@ fn match_samples(dir: &str, db: &Connection, args: &Args) -> Result<()> {
     Ok(())
 }
 
-// First check if we have a database next to the to the exe, otherwise try local directory
+// Checks for a database next to the exe
 fn check_for_db_file() -> Option<PathBuf> {
     let path = Path::new(&get_db_filename()).to_path_buf();
     if path.exists() {
@@ -1191,7 +1141,7 @@ fn get_dupes(
     get_by_id: &str,
     dupe_limit: usize,
 ) -> Result<Vec<Vec<DatabaseMeta>>> {
-    let mut hash_dupes = Vec::with_capacity(700_0000);
+    let mut hash_dupes = Vec::new();
 
     let mut stmnt = db.prepare(get_songs_query)?;
     let mut rows = stmnt.query([])?;
@@ -1516,7 +1466,6 @@ mod tests {
             sha256_hash: "aa".to_owned(),
             filename: "/pub/mods/it's a song.mod".to_owned(),
             samples: vec![sample(0, Some("bb"), "it's here"), sample(1, None, "")],
-            instrument_names: Vec::new(),
         };
         let no_pattern = TrackInfo {
             sha256_hash: "cc".to_owned(),
@@ -1753,7 +1702,6 @@ mod tests {
         let info = file.track_info();
         assert_eq!(info.pattern_hash, 0);
         assert!(info.samples.is_empty());
-        assert!(info.instrument_names.is_empty());
     }
 
     fn filters_from(extra: &[&str]) -> Result<Filters> {
