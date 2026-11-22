@@ -12,7 +12,7 @@ use std::{
     fs::File,
     hash::{Hash, Hasher},
     io::{Read, Write},
-    os::raw::c_char,
+    os::raw::{c_char, c_int},
     path::{Path, PathBuf},
 };
 
@@ -62,6 +62,8 @@ impl CSampleData {
         if self.data.is_null() || self.length == 0 {
             None
         } else {
+            // SAFETY: `data` is non-null and points at `length` bytes owned by the module,
+            // which outlives `self` (freed only by free_hash_data after use).
             unsafe { Some(std::slice::from_raw_parts(self.data, self.length as _)) }
         }
     }
@@ -76,32 +78,44 @@ struct CData {
     hash: u64,
     samples: *const CSampleData,
     instrument_names: *const *const c_char,
-    sample_count: u32,
-    instrument_count: u32,
-    channel_count: u32,
+    sample_count: c_int,
+    instrument_count: c_int,
+    channel_count: c_int,
 }
 
 impl CData {
     fn get_samples(&self) -> &[CSampleData] {
-        unsafe { std::slice::from_raw_parts(self.samples, self.sample_count as _) }
+        let count = usize::try_from(self.sample_count).unwrap_or(0);
+        if self.samples.is_null() || count == 0 {
+            return &[];
+        }
+        // SAFETY: `samples` is non-null and hash_file allocated `sample_count` initialized
+        // entries, which stay valid until free_hash_data.
+        unsafe { std::slice::from_raw_parts(self.samples, count) }
     }
 
     fn get_instrument_names(&self) -> Vec<String> {
-        let mut output = Vec::new();
-        for i in 0..self.instrument_count {
-            let name = unsafe { get_string_cstr(*self.instrument_names.offset(i as _)) };
-            output.push(name);
+        let count = usize::try_from(self.instrument_count).unwrap_or(0);
+        if self.instrument_names.is_null() || count == 0 {
+            return Vec::new();
         }
-        output
+        // SAFETY: `instrument_names` is non-null and hash_file allocated `instrument_count`
+        // initialized pointers, which stay valid until free_hash_data.
+        let names = unsafe { std::slice::from_raw_parts(self.instrument_names, count) };
+        names.iter().map(|&name| get_string_cstr(name)).collect()
     }
 }
 
 extern "C" {
-    fn hash_file(data: *const u8, len: u32, dump_patterns: i32) -> *const CData;
+    fn hash_file(data: *const u8, len: usize, dump_patterns: i32) -> *const CData;
     fn free_hash_data(data: *const CData);
 }
 
 fn get_string_cstr(c: *const c_char) -> String {
+    if c.is_null() {
+        return String::new();
+    }
+    // SAFETY: `c` is non-null and points at a NUL-terminated string owned by the module.
     match unsafe { std::ffi::CStr::from_ptr(c).to_str() } {
         Ok(s) => s.to_owned(),
         Err(_) => String::new(),
@@ -412,11 +426,8 @@ fn get_track_info(filename: &str, dump_patterns: bool) -> TrackInfo {
     let hash = sha2::Sha256::digest(&file_data);
     let dump_patterns = if dump_patterns { 1 } else { 0 };
 
-    let song_data = unsafe { hash_file(file_data.as_ptr(), file_data.len() as _, dump_patterns) };
-
-    if unsafe { (*song_data).hash } == 1 {
-        println!("Song with 0x1ff detected: {}", filename);
-    }
+    // SAFETY: the pointer/length pair describes `file_data`, which outlives the call.
+    let song_data = unsafe { hash_file(file_data.as_ptr(), file_data.len(), dump_patterns) };
 
     let mut track_info = TrackInfo {
         filename: filename.to_owned(),
@@ -425,9 +436,15 @@ fn get_track_info(filename: &str, dump_patterns: bool) -> TrackInfo {
     };
 
     if !song_data.is_null() {
-        let hash_id = unsafe { (*song_data).hash };
-        let samples = unsafe { (*song_data).get_samples() };
+        // SAFETY: `song_data` is non-null and stays valid until free_hash_data below.
+        let song = unsafe { &*song_data };
+        let hash_id = song.hash;
+        let samples = song.get_samples();
         track_info.pattern_hash = hash_id;
+
+        if hash_id == 1 {
+            println!("Song with 0x1ff detected: {}", filename);
+        }
 
         for sample in samples {
             let sha256_hash = sample
@@ -443,16 +460,10 @@ fn get_track_info(filename: &str, dump_patterns: bool) -> TrackInfo {
             });
         }
 
-        let instrument_names = unsafe { (*song_data).get_instrument_names() };
+        track_info.instrument_names = song.get_instrument_names();
 
-        for name in instrument_names {
-            track_info.instrument_names.push(name);
-        }
-
-        //let sample_names = unsafe { get_string_cstr((*song_data).sample_names) };
-        //track_info.sample_names = sample_names;
-        //track_info.pattern_hash = hash_id;
-
+        // SAFETY: `song_data` came from hash_file, is freed exactly once, and `song` and
+        // `samples` are not used afterwards.
         unsafe { free_hash_data(song_data) };
     }
 
@@ -1465,5 +1476,66 @@ mod tests {
                 (None, 0, 1, String::new(), 11, 6),
             ]
         );
+    }
+
+    struct TempFile(PathBuf);
+
+    impl TempFile {
+        fn create(name: &str, bytes: &[u8]) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "modland_hash_test_{}_{}",
+                std::process::id(),
+                name
+            ));
+            std::fs::write(&path, bytes).unwrap();
+            Self(path)
+        }
+
+        fn track_info(&self) -> TrackInfo {
+            get_track_info(self.0.to_str().unwrap(), false)
+        }
+    }
+
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn minimal_mod() -> Vec<u8> {
+        let mut bytes = vec![0u8; 20];
+        for i in 0..31 {
+            let mut header = [0u8; 30];
+            header[22..24].copy_from_slice(&(if i == 0 { 4u16 } else { 0 }).to_be_bytes());
+            header[25] = 64;
+            header[28..30].copy_from_slice(&1u16.to_be_bytes());
+            bytes.extend_from_slice(&header);
+        }
+        bytes.push(1);
+        bytes.push(127);
+        bytes.extend_from_slice(&[0u8; 128]);
+        bytes.extend_from_slice(b"M.K.");
+        let mut pattern = vec![0u8; 1024];
+        pattern[..4].copy_from_slice(&[0x01, 0xAC, 0x10, 0x00]);
+        bytes.extend_from_slice(&pattern);
+        bytes.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        bytes
+    }
+
+    #[test]
+    fn track_info_of_non_module_is_empty() {
+        let file = TempFile::create("not_a_module.bin", &[0x55; 64]);
+        let info = file.track_info();
+        assert_eq!(info.pattern_hash, 0);
+        assert!(info.samples.is_empty());
+        assert!(info.instrument_names.is_empty());
+    }
+
+    #[test]
+    fn track_info_of_minimal_mod_has_samples_and_hash() {
+        let file = TempFile::create("minimal.mod", &minimal_mod());
+        let info = file.track_info();
+        assert_ne!(info.pattern_hash, 0);
+        assert_eq!(info.samples.len(), 31);
     }
 }

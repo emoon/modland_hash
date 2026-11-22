@@ -6,6 +6,7 @@
 /************************************************************************/
 
 #include <exception>
+#include <new>
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -145,7 +146,7 @@ extern "C"
         openmpt::module* mod;
     };
 
-    CData* hash_file(unsigned char* buffer, int len, int dump_patterns) {
+    CData* hash_file(unsigned char* buffer, size_t len, int dump_patterns) {
         /*
         if (g_debug_heap == nullptr) {
             g_debug_heap = DebugHeapInit(1024 * 1024 * 1024);
@@ -156,26 +157,31 @@ extern "C"
         CData* data = nullptr;
 
         try {
-            data = (CData*)DebugHeapAllocate(g_debug_heap, sizeof(CData), alignof(CData)); 
+            data = (CData*)DebugHeapAllocate(g_debug_heap, sizeof(CData), alignof(CData));
+            if (data == nullptr) {
+                return nullptr;
+            }
             memset(data, 0, sizeof(CData));
 
             openmpt::detail::initial_ctls_map ctls;
             //ctls["load.skip_samples"] = "1";
             ctls["load.skip_plugins"] = "1";
-            data->mod = new openmpt::module(buffer, (size_t)len, std::clog, ctls);
+            data->mod = new openmpt::module(buffer, len, std::clog, ctls);
             
             OpenMPT::CSoundFile* sf = data->mod->get_snd_file();
             
             int samples_count = sf->GetNumSamples();
             int instrument_count = sf->GetNumInstruments();
 
-            CSampleData* samples = nullptr;
-
             if (samples_count > 0) {
-                samples = (CSampleData*)DebugHeapAllocate(g_debug_heap, sizeof(CSampleData) * samples_count, alignof(CSampleData));
+                // Owned by data from here on so free_hash_data releases it if we throw below.
+                data->samples = (CSampleData*)DebugHeapAllocate(g_debug_heap, sizeof(CSampleData) * samples_count, alignof(CSampleData));
+                if (data->samples == nullptr) {
+                    throw std::bad_alloc();
+                }
 
                 for (int i = 1; i < samples_count + 1; i++) {
-                    CSampleData& sample = samples[i - 1]; 
+                    CSampleData& sample = data->samples[i - 1];
                     const auto& mod_sample = sf->GetSample(i);
 
                     sample.data = (uint8_t*)mod_sample.pData.pSample8;
@@ -198,20 +204,19 @@ extern "C"
                 }
             }
 
-            char** instruments = nullptr;
-
             if (instrument_count > 0) {
-                instruments = (char**)DebugHeapAllocate(g_debug_heap, sizeof(char*) * instrument_count, alignof(char*)); 
+                data->instrument_names = (char**)DebugHeapAllocate(g_debug_heap, sizeof(char*) * instrument_count, alignof(char*));
+                if (data->instrument_names == nullptr) {
+                    throw std::bad_alloc();
+                }
 
                 for (int i = 0; i < instrument_count; i++) {
-                    instruments[i] = (char*)sf->GetInstrumentName(i);
+                    data->instrument_names[i] = (char*)sf->GetInstrumentName(i);
                 }
-            } 
+            }
 
             data->hash = hash_patterns(*data->mod, dump_patterns);
-            data->samples = samples;
             data->sample_count = samples_count;
-            data->instrument_names = instruments;
             data->instrument_count = instrument_count;
             data->channel_count = data->mod->get_num_channels();
         }
