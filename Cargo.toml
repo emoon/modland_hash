@@ -21,6 +21,7 @@ rayon = "1.5.1"
 sha2 = "0.10"
 rusqlite = { version = "0.31.0", features = ["bundled"] }
 sevenz-rust = "0.5"
+time = "0.3"
 
 [profile.dev.package.sevenz-rust]
 opt-level = 2
