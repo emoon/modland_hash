@@ -572,6 +572,7 @@ dependencies = [
  "sevenz-rust",
  "sha2",
  "simple_logger",
+ "time",
  "ureq",
  "walkdir",
 ]

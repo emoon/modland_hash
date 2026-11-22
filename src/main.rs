@@ -765,8 +765,18 @@ fn download_db() -> Result<()> {
     Ok(())
 }
 
+// When the archived database was built, if the archive recorded it.
+fn entry_date(entry: &sevenz_rust::SevenZArchiveEntry) -> Option<time::Date> {
+    if !entry.has_last_modified_date {
+        return None;
+    }
+    let modified = time::OffsetDateTime::try_from(entry.last_modified_date()).ok()?;
+    Some(modified.date())
+}
+
 // The archive holds the database as its only file; the first entry with data is used.
-fn extract_database(archive: &Path, db_path: &Path) -> Result<()> {
+// Returns the date of the extracted database.
+fn extract_database(archive: &Path, db_path: &Path) -> Result<Option<time::Date>> {
     let mut sz = sevenz_rust::SevenZReader::open(archive, "pass".into())?;
     let total_size: u64 = sz
         .archive()
@@ -786,7 +796,7 @@ fn extract_database(archive: &Path, db_path: &Path) -> Result<()> {
             return Ok(true);
         }
         let written = write_part(db_path, reader, |pos| pb.set_position(pos));
-        outcome = Some((entry.size(), written));
+        outcome = Some((entry.size(), written, entry_date(entry)));
         Ok(false)
     });
 
@@ -797,12 +807,13 @@ fn extract_database(archive: &Path, db_path: &Path) -> Result<()> {
     }
 
     match outcome {
-        Some((expected, written)) => {
+        Some((expected, written, date)) => {
             if let Err(e) = check_complete(written?, expected) {
                 let _ = std::fs::remove_file(part_path(db_path));
                 return Err(e.into());
             }
-            Ok(publish_part(db_path)?)
+            publish_part(db_path)?;
+            Ok(date)
         }
         None => bail!("archive contains no files"),
     }
@@ -819,7 +830,7 @@ fn check_complete(written: u64, expected: u64) -> Result<(), CopyError> {
     )))
 }
 
-fn decompress_archive(archive: &Path, db_path: &Path) -> Result<()> {
+fn decompress_archive(archive: &Path, db_path: &Path) -> Result<Option<time::Date>> {
     let result = extract_database(archive, db_path);
 
     let archive_is_usable = matches!(
@@ -839,7 +850,7 @@ fn decompress_archive(archive: &Path, db_path: &Path) -> Result<()> {
     // A broken archive would fail the same way on every start.
     let removed = std::fs::remove_file(archive);
     if result.is_ok() {
-        return removed.with_context(|| format!("Failed to remove {}", archive.display()));
+        removed.with_context(|| format!("Failed to remove {}", archive.display()))?;
     }
     result.with_context(|| {
         format!(
@@ -856,7 +867,16 @@ fn decompress_db() -> Result<()> {
         return Ok(());
     }
 
-    decompress_archive(&archive, Path::new(&get_db_filename()))
+    let date = decompress_archive(&archive, Path::new(&get_db_filename()))?;
+    eprintln!("{}", database_date_message(date));
+    Ok(())
+}
+
+fn database_date_message(date: Option<time::Date>) -> String {
+    match date {
+        Some(date) => format!("Database updated {date}"),
+        None => "Database updated (date unknown)".to_owned(),
+    }
 }
 
 fn get_samples_from_song_id(db: &Connection, song_id: u64) -> Result<Vec<String>> {
@@ -1952,6 +1972,36 @@ mod tests {
         assert_eq!(std::fs::read(&db).unwrap(), b"new database contents");
         assert!(!archive.exists());
         assert!(!part_path(&db).exists());
+    }
+
+    #[test]
+    fn decompress_reports_the_date_stored_in_the_archive() {
+        let dir = TempDir::create("decompress_date");
+        let archive = dir.path("db.7z");
+        // 2025-11-07 12:00:00 UTC as a Windows file time.
+        let modified = sevenz_rust::nt_time::FileTime::from_unix_time(1_762_516_800).unwrap();
+        let mut entry = sevenz_rust::SevenZArchiveEntry::new();
+        entry.name = "modland_hash.db".to_owned();
+        entry.has_stream = true;
+        entry.has_last_modified_date = true;
+        entry.last_modified_date = modified;
+        let mut writer = sevenz_rust::SevenZWriter::create(&archive).unwrap();
+        writer
+            .push_archive_entry(entry, Some(&b"dated database"[..]))
+            .unwrap();
+        writer.finish().unwrap();
+
+        let date = decompress_archive(&archive, &dir.path("live.db")).unwrap();
+
+        assert_eq!(database_date_message(date), "Database updated 2025-11-07");
+    }
+
+    #[test]
+    fn database_without_a_date_says_so() {
+        assert_eq!(
+            database_date_message(None),
+            "Database updated (date unknown)"
+        );
     }
 
     #[test]
