@@ -18,6 +18,7 @@ use std::{
 
 use walkdir::WalkDir;
 
+static TOOL_NAME: &str = "modland_hash";
 static DB_FILENAME: &str = "modland_hash.db";
 static DB_REMOTE: &str = "https://www.dropbox.com/scl/fi/gtk2yri6iizlaeb6b0j0j/modland_hash.db.7z?rlkey=axcrqv54eg2c1yju6vf043ly1&dl=1";
 
@@ -394,11 +395,10 @@ fn get_files(path: &str, recurse: bool) -> Vec<String> {
     files
 }
 
-// The database and its archive live next to the executable and must not be scanned as input
+// The tool's own files (executable, database, archive, temp files) all carry its name and may
+// sit in the scanned directory; they are never input.
 fn should_scan(file_name: &str) -> bool {
-    file_name != DB_FILENAME
-        && file_name.strip_suffix(".7z") != Some(DB_FILENAME)
-        && !file_name.ends_with(".listing")
+    !file_name.contains(TOOL_NAME) && !file_name.ends_with(".listing")
 }
 
 fn get_url(filename: &str) -> String {
@@ -487,6 +487,10 @@ fn get_db_filename() -> String {
     let path = Path::new(&p);
     let path = path.parent().unwrap().join(DB_FILENAME);
     path.into_os_string().into_string().unwrap()
+}
+
+fn get_archive_filename() -> PathBuf {
+    PathBuf::from(format!("{}.7z", get_db_filename()))
 }
 
 enum DbCommand {
@@ -635,29 +639,48 @@ fn part_path(path: &Path) -> PathBuf {
     PathBuf::from(part)
 }
 
+// Which side of a copy failed: callers treat a bad source differently from a full disk.
+#[derive(Debug)]
+enum CopyError {
+    Source(std::io::Error),
+    Dest(std::io::Error),
+}
+
+impl std::fmt::Display for CopyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            CopyError::Source(e) => write!(f, "read failed: {}", e),
+            CopyError::Dest(e) => write!(f, "write failed: {}", e),
+        }
+    }
+}
+
+impl std::error::Error for CopyError {}
+
 // `final_path` only ever appears fully written: data goes to `<final_path>.part` first.
 fn write_atomically(
     final_path: &Path,
     mut reader: impl Read,
     mut on_progress: impl FnMut(u64),
-) -> std::io::Result<()> {
+) -> Result<(), CopyError> {
     let part = part_path(final_path);
-    let mut copy = || -> std::io::Result<()> {
-        let mut file = File::create(&part)?;
+    let mut copy = || -> Result<(), CopyError> {
+        let mut file = File::create(&part).map_err(CopyError::Dest)?;
         let mut buf = vec![0u8; 64 * 1024];
         let mut written = 0u64;
         loop {
-            let read_size = reader.read(&mut buf)?;
+            let read_size = reader.read(&mut buf).map_err(CopyError::Source)?;
             if read_size == 0 {
                 break;
             }
-            file.write_all(&buf[..read_size])?;
+            file.write_all(&buf[..read_size]).map_err(CopyError::Dest)?;
             written += read_size as u64;
             on_progress(written);
         }
-        file.flush()?;
+        // The rename must not become durable before the data.
+        file.sync_all().map_err(CopyError::Dest)?;
         drop(file);
-        std::fs::rename(&part, final_path)
+        std::fs::rename(&part, final_path).map_err(CopyError::Dest)
     };
 
     let result = copy();
@@ -692,7 +715,7 @@ fn create_progress_bar(len: Option<u64>) -> ProgressBar {
 
 // Download and upack the database
 fn download_db() -> Result<()> {
-    let filename = PathBuf::from(format!("{}.7z", get_db_filename()));
+    let filename = get_archive_filename();
 
     let resp = ureq::get(DB_REMOTE).call()?;
     let len = resp
@@ -732,7 +755,8 @@ fn extract_database(archive: &Path, db_path: &Path) -> Result<()> {
 
     let mut outcome = None;
     sz.for_each_entries(|entry, reader| {
-        if !entry.has_stream() {
+        // Returning false only ends the current block, so later blocks still call back.
+        if outcome.is_some() || !entry.has_stream() {
             return Ok(true);
         }
         outcome = Some(write_atomically(db_path, reader, |pos| {
@@ -749,7 +773,22 @@ fn extract_database(archive: &Path, db_path: &Path) -> Result<()> {
 
 fn decompress_archive(archive: &Path, db_path: &Path) -> Result<()> {
     let result = extract_database(archive, db_path);
-    // An archive that failed to unpack would fail the same way on every start.
+
+    let archive_is_usable = matches!(
+        result.as_ref().map_err(|e| e.downcast_ref::<CopyError>()),
+        Err(Some(CopyError::Dest(_)))
+    );
+    if archive_is_usable {
+        return result.with_context(|| {
+            format!(
+                "Failed to write {}; {} was kept and is unpacked on the next run",
+                db_path.display(),
+                archive.display()
+            )
+        });
+    }
+
+    // A broken archive would fail the same way on every start.
     let _ = std::fs::remove_file(archive);
     result.with_context(|| {
         format!(
@@ -760,7 +799,7 @@ fn decompress_archive(archive: &Path, db_path: &Path) -> Result<()> {
 }
 
 fn decompress_db() -> Result<()> {
-    let archive = PathBuf::from(format!("{}.7z", get_db_filename()));
+    let archive = get_archive_filename();
 
     if !archive.exists() {
         return Ok(());
@@ -768,25 +807,6 @@ fn decompress_db() -> Result<()> {
 
     decompress_archive(&archive, Path::new(&get_db_filename()))
 }
-
-/*
-    let re = Regex::new(search_string).unwrap();
-    let mut count = 0;
-
-    tracks.iter().for_each(|track| {
-        if let Some(metadata) = track.metadata.as_ref() {
-            if re.is_match(&metadata.sample_names.to_ascii_lowercase()) {
-                println!("===============================================================");
-                println!("Matching {}", track.filename);
-                println!("{}", metadata.sample_names);
-                count += 1;
-            }
-        }
-    });
-
-    println!("Total matches {}", count);
-}
-     */
 
 fn get_samples_from_song_id(db: &Connection, song_id: u64) -> Result<Vec<String>> {
     let mut samples = Vec::new();
@@ -821,10 +841,6 @@ fn get_files_from_sha_hash(info: &TrackInfo, db: &Connection) -> Result<Vec<Data
 
 fn get_files_from_pattern_hash(info: &TrackInfo, db: &Connection) -> Result<Vec<DatabaseMeta>> {
     let mut entries = Vec::new();
-
-    if info.pattern_hash == 0 {
-        return Ok(entries);
-    }
 
     let Some(pattern_hash) = stored_pattern_hash(info.pattern_hash) else {
         return Ok(entries);
@@ -1631,8 +1647,24 @@ mod tests {
         dir.write(DB_FILENAME, b"x");
         dir.write(&format!("{}.7z", DB_FILENAME), b"x");
         dir.write("x.listing", b"x");
-        dir.write("my_modland_hash.mod", b"x");
-        assert_eq!(dir.scan(false), vec!["a.mod", "my_modland_hash.mod"]);
+        assert_eq!(dir.scan(false), vec!["a.mod"]);
+    }
+
+    #[test]
+    fn get_files_skips_the_tools_own_files() {
+        let dir = TempDir::create("own_files");
+        dir.write("a.mod", b"a");
+        for name in [
+            "modland_hash",
+            "modland_hash.exe",
+            "modland_hash.db.7z.part",
+            "modland_hash.db.part",
+            "modland_hash.db-journal",
+            "my_modland_hash.mod",
+        ] {
+            dir.write(name, b"x");
+        }
+        assert_eq!(dir.scan(false), vec!["a.mod"]);
     }
 
     #[test]
@@ -1831,7 +1863,7 @@ mod tests {
 
         let result = write_atomically(&target, FailingReader { sent: false }, |_| {});
 
-        assert!(result.is_err());
+        assert!(matches!(result, Err(CopyError::Source(_))));
         assert!(!target.exists());
         assert!(!part_path(&target).exists());
     }
@@ -1867,5 +1899,47 @@ mod tests {
         assert_eq!(std::fs::read(&db).unwrap(), b"new database contents");
         assert!(!archive.exists());
         assert!(!part_path(&db).exists());
+    }
+
+    #[test]
+    fn decompress_keeps_archive_when_database_cannot_be_written() {
+        let dir = TempDir::create("decompress_dest_fail");
+        let src = dir.path("modland_hash.db");
+        let archive = dir.path("db.7z");
+        std::fs::write(&src, b"new database contents").unwrap();
+        sevenz_rust::compress_to_path(&src, &archive).unwrap();
+
+        let err = decompress_archive(&archive, &dir.path("missing_dir/live.db")).unwrap_err();
+
+        assert!(format!("{err:#}").contains("was kept"));
+        assert!(archive.exists());
+    }
+
+    #[test]
+    fn decompress_multi_file_archive_uses_first_file_only() {
+        let dir = TempDir::create("decompress_multi");
+        let archive = dir.path("db.7z");
+
+        // One block per pushed entry.
+        let mut writer = sevenz_rust::SevenZWriter::create(&archive).unwrap();
+        for (name, content) in [("a.db", "first file"), ("b.txt", "second file")] {
+            dir.write(name, content.as_bytes());
+            let entry = sevenz_rust::SevenZArchiveEntry::from_path(dir.path(name), name.to_owned());
+            writer
+                .push_archive_entry(entry, Some(content.as_bytes()))
+                .unwrap();
+        }
+        writer.finish().unwrap();
+        let blocks = sevenz_rust::SevenZReader::open(&archive, "pass".into())
+            .unwrap()
+            .archive()
+            .folders
+            .len();
+        assert_eq!(blocks, 2);
+
+        let db = dir.path("live.db");
+        decompress_archive(&archive, &db).unwrap();
+
+        assert_eq!(std::fs::read(&db).unwrap(), b"first file");
     }
 }
