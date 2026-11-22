@@ -368,10 +368,13 @@ fn get_files(path: &str, recurse: bool) -> Vec<String> {
     }
 
     // Check if "path" is a single file
-    let md = std::fs::metadata(path).unwrap();
-
-    if md.is_file() {
-        return vec![path.to_owned()];
+    match std::fs::metadata(path) {
+        Ok(md) if md.is_file() => return vec![path.to_owned()],
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("Skipping {}: {}", path, e);
+            return Vec::new();
+        }
     }
 
     let _spinner_style = ProgressStyle::with_template("{prefix:.bold.dim} {spinner} {wide_msg}")
@@ -388,22 +391,31 @@ fn get_files(path: &str, recurse: bool) -> Vec<String> {
         .max_depth(max_depth)
         .into_iter()
         .filter_map(|e| {
-            let file = e.unwrap();
-            let metadata = file.metadata().unwrap();
-
-            if let Some(filename) = file.path().to_str() {
-                if metadata.is_file()
-                    && !filename.ends_with(".listing")
-                    && !filename.contains("modland_hash")
-                {
-                    //pb.set_message(filename.to_owned());
-                    return Some(filename.to_owned());
+            let file = match e {
+                Ok(file) => file,
+                Err(e) => {
+                    let path = e.path().unwrap_or(Path::new(path));
+                    eprintln!("Skipping {}: {}", path.display(), e);
+                    return None;
                 }
+            };
+
+            let filename = file.path().to_str()?;
+            if file.file_type().is_file() && should_scan(&file.file_name().to_string_lossy()) {
+                //pb.set_message(filename.to_owned());
+                return Some(filename.to_owned());
             }
             None
         })
         .collect();
     files
+}
+
+// The database and its archive live next to the executable and must not be scanned as input
+fn should_scan(file_name: &str) -> bool {
+    file_name != DB_FILENAME
+        && file_name.strip_suffix(".7z") != Some(DB_FILENAME)
+        && !file_name.ends_with(".listing")
 }
 
 fn get_url(filename: &str) -> String {
@@ -418,11 +430,9 @@ fn get_stored_url(filename: &str) -> String {
 }
 
 // Fetches info for a track/song
-fn get_track_info(filename: &str, dump_patterns: bool) -> TrackInfo {
+fn get_track_info(filename: &str, dump_patterns: bool) -> Result<TrackInfo> {
     // Calculate sha256 of the file
-    let mut file = File::open(filename).unwrap();
-    let mut file_data = Vec::new();
-    file.read_to_end(&mut file_data).unwrap();
+    let file_data = std::fs::read(filename)?;
     let hash = sha2::Sha256::digest(&file_data);
     let dump_patterns = if dump_patterns { 1 } else { 0 };
 
@@ -467,7 +477,7 @@ fn get_track_info(filename: &str, dump_patterns: bool) -> TrackInfo {
         unsafe { free_hash_data(song_data) };
     }
 
-    track_info
+    Ok(track_info)
 }
 
 // Get the target filename
@@ -617,7 +627,13 @@ fn build_database(out_filename: &str, database_path: &str, args: &Args) {
         .par_iter()
         .enumerate()
         .for_each(|(index, input_path)| {
-            let mut track = get_track_info(input_path, args.dump_patterns);
+            let mut track = match get_track_info(input_path, args.dump_patterns) {
+                Ok(track) => track,
+                Err(e) => {
+                    eprintln!("Skipping {}: {}", input_path, e);
+                    return;
+                }
+            };
             track.filename = input_path.replace(database_path, "");
 
             tx.send(DbCommand::Insert {
@@ -925,7 +941,13 @@ fn match_dir_against_db(dir: &str, args: &Args, db: &Connection) -> Result<()> {
 
     //files.par_iter().for_each(|filename| {
     for filename in files {
-        let info = get_track_info(&filename, args.dump_patterns);
+        let info = match get_track_info(&filename, args.dump_patterns) {
+            Ok(info) => info,
+            Err(e) => {
+                eprintln!("Skipping {}: {}", filename, e);
+                continue;
+            }
+        };
 
         println!("Matching {}", filename);
 
@@ -976,7 +998,13 @@ fn match_samples(dir: &str, db: &Connection, args: &Args) -> Result<()> {
     let files = get_files(dir, args.recursive);
 
     for filename in files {
-        let info = get_track_info(&filename, args.dump_patterns);
+        let info = match get_track_info(&filename, args.dump_patterns) {
+            Ok(info) => info,
+            Err(e) => {
+                eprintln!("Skipping {}: {}", filename, e);
+                continue;
+            }
+        };
         let mut top_samples = Vec::new();
 
         if info.samples.is_empty() {
@@ -1492,7 +1520,7 @@ mod tests {
         }
 
         fn track_info(&self) -> TrackInfo {
-            get_track_info(self.0.to_str().unwrap(), false)
+            get_track_info(self.0.to_str().unwrap(), false).unwrap()
         }
     }
 
@@ -1520,6 +1548,91 @@ mod tests {
         bytes.extend_from_slice(&pattern);
         bytes.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
         bytes
+    }
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn create(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "{}_test_{}_{}",
+                DB_FILENAME.trim_end_matches(".db"),
+                std::process::id(),
+                name
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn write(&self, rel: &str, bytes: &[u8]) {
+            let path = self.0.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+
+        fn scan(&self, recurse: bool) -> Vec<String> {
+            let root = self.0.to_str().unwrap();
+            let mut files: Vec<String> = get_files(root, recurse)
+                .into_iter()
+                .map(|f| {
+                    f.strip_prefix(root)
+                        .unwrap()
+                        .trim_start_matches('/')
+                        .to_owned()
+                })
+                .collect();
+            files.sort();
+            files
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn get_files_scans_dirs_with_modland_hash_in_path() {
+        let dir = TempDir::create("in_path");
+        assert!(dir.0.to_str().unwrap().contains("modland_hash"));
+        dir.write("a.mod", b"a");
+        assert_eq!(dir.scan(false), vec!["a.mod"]);
+    }
+
+    #[test]
+    fn get_files_skips_database_and_listing_files() {
+        let dir = TempDir::create("skips");
+        dir.write("a.mod", b"a");
+        dir.write(DB_FILENAME, b"x");
+        dir.write(&format!("{}.7z", DB_FILENAME), b"x");
+        dir.write("x.listing", b"x");
+        dir.write("my_modland_hash.mod", b"x");
+        assert_eq!(dir.scan(false), vec!["a.mod", "my_modland_hash.mod"]);
+    }
+
+    #[test]
+    fn get_files_respects_recursion() {
+        let dir = TempDir::create("depth");
+        dir.write("a.mod", b"a");
+        dir.write("sub/b.mod", b"b");
+        assert_eq!(dir.scan(false), vec!["a.mod"]);
+        assert_eq!(dir.scan(true), vec!["a.mod", "sub/b.mod"]);
+    }
+
+    #[test]
+    fn get_files_of_missing_path_is_empty() {
+        let dir = TempDir::create("missing");
+        let missing = dir.0.join("nope");
+        assert!(get_files(missing.to_str().unwrap(), true).is_empty());
+    }
+
+    #[test]
+    fn track_info_of_missing_file_is_err() {
+        let dir = TempDir::create("missing_track");
+        let missing = dir.0.join("nope.mod");
+        assert!(get_track_info(missing.to_str().unwrap(), false).is_err());
     }
 
     #[test]
